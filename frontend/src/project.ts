@@ -1,5 +1,5 @@
 import {stats,type Pattern} from './engine';
-export type Project={schemaVersion:2,pattern?:Pattern,source?:string,mask?:string,box?:number[],points:{x:number,y:number,label:number}[],locked:string[],step:number,pitch:number,selectionMode:string,selectionDirty:boolean,tuning?:{width:number,colors:number}};
+export type Project={schemaVersion:2,normalization?:string,pattern?:Pattern,source?:string,mask?:string,box?:number[],points:{x:number,y:number,label:number}[],locked:string[],step:number,pitch:number,selectionMode:string,selectionDirty:boolean,tuning?:{width:number,colors:number}};
 const fail=()=>{throw Error('项目格式无效或超过限制')};
 export function validateProject(raw:any):Project{
  if(!raw||![1,2].includes(raw.schemaVersion))throw Error('不支持的项目版本');
@@ -24,6 +24,6 @@ export function validateProject(raw:any):Project{
  const locked=raw.locked??[];if(!Array.isArray(locked)||locked.some((c:any)=>typeof c!=='string'||!pattern?.palette.some(x=>x.code===c)))fail();
  if(raw.step!==undefined&&(!Number.isInteger(raw.step)||raw.step<1||raw.step>3))fail();
  if(raw.tuning&&(![32,48,64].includes(raw.tuning.width)||![8,12,16,24,32].includes(raw.tuning.colors)))fail();
- return{schemaVersion:2,pattern,source,mask,box,points:points.map((p:any)=>({x:p.x,y:p.y,label:p.label})),locked:[...new Set<string>(locked)],step:pattern&&raw.step!==2?(raw.step??3):1,pitch:raw.pitch===5?5:2.6,selectionMode:raw.selectionMode==='object'?'object':'whole',selectionDirty:!!raw.selectionDirty,...(raw.tuning?{tuning:{width:raw.tuning.width,colors:raw.tuning.colors}}:{})};
+ return{schemaVersion:2,...(typeof raw.normalization==='string'?{normalization:raw.normalization.slice(0,100)}:{}),pattern,source,mask,box,points:points.map((p:any)=>({x:p.x,y:p.y,label:p.label})),locked:[...new Set<string>(locked)],step:pattern&&raw.step!==2?(raw.step??3):1,pitch:raw.pitch===5?5:2.6,selectionMode:raw.selectionMode==='object'?'object':'whole',selectionDirty:!!raw.selectionDirty,...(raw.tuning?{tuning:{width:raw.tuning.width,colors:raw.tuning.colors}}:{})};
 }
 export function parseProject(text:string){if(text.length>50_000_000)throw Error('项目文件过大');return validateProject(JSON.parse(text))}

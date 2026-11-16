@@ -1,4 +1,6 @@
 import {MARD_COLORS} from './palettes/mard';
+import {refinePalette,REFINED_ALGORITHM} from './refinement';
+export {REFINED_ALGORITHM} from './refinement';
 import {hexRgb,srgbToOklab,distanceSquared,hueDistanceSquared} from './color';
 export {hexRgb,srgbToOklab,distanceSquared,hueDistanceSquared} from './color';
 export type Color={code:string,hex:string,name?:string};
@@ -80,6 +82,16 @@ function optimize(grid:SampleGrid,colors:Color[],k:number,metric:Metric=distance
 export function generateLegacyPattern(rgba:Uint8ClampedArray,w:number,h:number,mask:Uint8Array,n:number,k:number,colors:Color[]=DEFAULT_PALETTE):Pattern{validate(colors,k);const g=sampleGrid(rgba,w,h,mask,n);return makePattern(g,colors,legacySubset(g,colors,k),k,false,'rgb-frequency-v2')}
 export function generateV3Pattern(rgba:Uint8ClampedArray,w:number,h:number,mask:Uint8Array,n:number,k:number,colors:Color[]=DEFAULT_PALETTE):Pattern{validate(colors,k);const g=sampleGrid(rgba,w,h,mask,n);return makePattern(g,colors,optimize(g,colors,k),k,true,V3_ALGORITHM)}
 export function generatePattern(rgba:Uint8ClampedArray,w:number,h:number,mask:Uint8Array,n:number,k:number,colors:Color[]=DEFAULT_PALETTE,sampling:SamplingMode='mean'):Pattern{validate(colors,k);const g=sampleGrid(rgba,w,h,mask,n,sampling),v3=optimize(g,colors,k);const p=makePattern(g,colors,optimize(g,colors,k,hueDistanceSquared,v3),k,true,COLOR_ALGORITHM,hueDistanceSquared);return sampling==='dominant'?{...p,sampling}:p}
+export function generateRefinedPattern(rgba:Uint8ClampedArray,w:number,h:number,mask:Uint8Array,n:number,k:number,colors:Color[]=DEFAULT_PALETTE,sampling:SamplingMode='mean'):Pattern{
+ const baseline=generatePattern(rgba,w,h,mask,n,k,colors,sampling),grid=sampleGrid(rgba,w,h,mask,n,sampling);
+ const indices=baseline.palette.map(c=>colors.findIndex(v=>v.code===c.code));
+ const p=makePattern(grid,colors,refinePalette(grid.values,colors,indices),k,true,REFINED_ALGORITHM,hueDistanceSquared);
+ return sampling==='dominant'?{...p,sampling}:p;
+}
+export function diagnoseRefinement(rgba:Uint8ClampedArray,w:number,h:number,mask:Uint8Array,n:number,k:number,colors:Color[]=DEFAULT_PALETTE,sampling:SamplingMode='mean'){
+ const grid=sampleGrid(rgba,w,h,mask,n,sampling),baseline=generatePattern(rgba,w,h,mask,n,k,colors,sampling),refined=generateRefinedPattern(rgba,w,h,mask,n,k,colors,sampling);
+ return{grid,baseline,refined,errors:{baseline:patternHueError(grid,baseline),refined:patternHueError(grid,refined)}};
+}
 export function generateCandidates(rgba:Uint8ClampedArray,w:number,h:number,mask:Uint8Array,colors:Color[]=DEFAULT_PALETTE){return[{label:'更好拼',n:32,k:8},{label:'推荐',n:48,k:12},{label:'更细致',n:64,k:16}].map(({label,n,k})=>({label,pattern:generatePattern(rgba,w,h,mask,n,k,colors)}))}
 export function patternError(grid:SampleGrid,pattern:Pattern){const labs=new Map(pattern.palette.map(c=>[c.code,srgbToOklab(hexRgb(c.hex))]));let sum=0,count=0;for(let i=0;i<grid.values.length;i++){const v=grid.values[i];if(v){const c=labs.get(pattern.cells[i]!);if(!c)throw Error('图纸缺失有效色');sum+=distanceSquared(srgbToOklab(v),c);count++}}return sum/count}
 export function diagnosePattern(rgba:Uint8ClampedArray,w:number,h:number,mask:Uint8Array,n:number,k:number,colors:Color[]=DEFAULT_PALETTE){validate(colors,k);const grid=sampleGrid(rgba,w,h,mask,n),subset=legacySubset(grid,colors,k),legacy=makePattern(grid,colors,subset,k,false,'rgb-frequency-v2'),remapped=makePattern(grid,colors,subset,k,true,'legacy-subset-oklab-remap'),optimized=makePattern(grid,colors,optimize(grid,colors,k),k,true,V3_ALGORITHM),full=makePattern(grid,colors,colors.map((_,i)=>i),colors.length,true,'oklab-full-diagnostic');return{grid,full,legacy,optimized,errors:{legacy:patternError(grid,legacy),legacyRemapped:patternError(grid,remapped),optimized:patternError(grid,optimized),full:patternError(grid,full)}}}
@@ -114,7 +126,7 @@ export function planColorReplace(pattern:Pattern,fromCode:string,toCode:string,l
 export function planMerge(pattern:Pattern,locked:string[]=[]):{pattern:Pattern,mapping:Record<string,string>,affected:number}{
  const {counts}=stats(pattern.cells),used=pattern.palette.filter(c=>(counts[c.code]??0)>0),protectedCodes=new Set(locked),rare=new Set(rareColors(pattern));
  let targets=used.filter(c=>!rare.has(c.code)||protectedCodes.has(c.code));if(!targets.length&&used.length)targets=[used.slice().sort((a,b)=>counts[b.code]-counts[a.code]||a.code.localeCompare(b.code))[0]];
- const metric=pattern.algorithm===COLOR_ALGORITHM?hueDistanceSquared:distanceSquared;
+ const metric=pattern.algorithm===COLOR_ALGORITHM||pattern.algorithm===REFINED_ALGORITHM?hueDistanceSquared:distanceSquared;
  const coords=targets.map(c=>srgbToOklab(hexRgb(c.hex))),targetCodes=new Set(targets.map(c=>c.code)),mapping:Record<string,string>=Object.create(null);
  for(const c of used)if(rare.has(c.code)&&!protectedCodes.has(c.code)&&!targetCodes.has(c.code))mapping[c.code]=targets[nearestIndex(srgbToOklab(hexRgb(c.hex)),coords,metric)].code;
  let affected=0;const cells=pattern.cells.map(code=>{if(code!==null&&Object.hasOwn(mapping,code)){affected++;return mapping[code]}return code}),after=stats(cells).counts;
