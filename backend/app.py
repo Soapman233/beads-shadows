@@ -1,4 +1,4 @@
-"""Local, single-work-image segmentation service."""
+"""Local segmentation service with bounded image lifetime and shared SAM predictor."""
 from __future__ import annotations
 import base64
 import io
@@ -16,7 +16,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, UnidentifiedImageError
+from image_store import ImageStore, ImageUnavailable
+from normalization import normalize_image, NORMALIZATION_VERSION
 from pydantic import BaseModel, Field
 
 MAX_BYTES = 20 * 1024 * 1024
@@ -24,7 +26,19 @@ MAX_PIXELS = 20_000_000
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 ROOT = Path(__file__).resolve().parent
 lock = threading.Lock()
-current: dict = {}
+encoded_image_id = None
+
+def invalidate_encoding(image_id):
+    global encoded_image_id
+    if encoded_image_id == image_id:
+        encoded_image_id = None
+
+store = ImageStore(
+    max_images=int(os.environ.get('BEAD_MAX_IMAGES', '8')),
+    max_bytes=int(float(os.environ.get('BEAD_IMAGE_MEMORY_MB', '64')) * 1024 * 1024),
+    ttl_seconds=float(os.environ.get('BEAD_IMAGE_TTL_SECONDS', '1800')),
+    on_remove=invalidate_encoding,
+)
 predictor = None
 torch = None
 mode = 'GrabCut'
@@ -33,12 +47,15 @@ detail = '传统分割降级模式；SAM 2.1 未就绪。'
 
 def initialize_model():
     global predictor, torch, mode, device, detail
+    if os.environ.get('BEAD_DISABLE_SAM') == '1':
+        detail = '传统分割模式；本进程显式禁用 SAM。'
+        return
     checkpoint = Path(os.environ.get('SAM2_CHECKPOINT', str(ROOT / 'models/sam2.1_hiera_tiny.pt')))
     if not checkpoint.exists():
         detail = '传统分割降级模式；未找到 SAM 2.1 Tiny 权重。'
         return
     try:
-        source = ROOT / 'vendor/sam2-main'
+        source = Path(os.environ.get('SAM2_SOURCE', str(ROOT / 'vendor/sam2-main')))
         if source.exists():
             sys.path.insert(0, str(source))
         import torch as pt
@@ -69,6 +86,16 @@ app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:5173', 'http
 async def invalid_request(_request, _error):
     return JSONResponse(status_code=400, content={'detail':'请求字段无效，请检查图片、框选坐标和修正点'})
 
+@app.exception_handler(ImageUnavailable)
+async def unavailable_image(_request, error):
+    messages = {
+        'IMAGE_EXPIRED': '图片因长时间未使用已过期，请重新注册项目源图',
+        'IMAGE_EVICTED': '图片已被存储预算回收，请重新注册项目源图',
+        'IMAGE_NOT_FOUND': '没有找到图片，请重新注册项目源图',
+    }
+    return JSONResponse(status_code=404 if error.code == 'IMAGE_NOT_FOUND' else 410,
+                        content={'code': error.code, 'detail': messages[error.code]})
+
 def png_url(image: Image.Image):
     output = io.BytesIO()
     image.save(output, format='PNG')
@@ -76,7 +103,7 @@ def png_url(image: Image.Image):
 
 @app.get('/health')
 def health():
-    return {'ready': True, 'mode': mode, 'device': device, 'detail': detail}
+    return {'ready': True, 'mode': mode, 'device': device, 'detail': detail, 'normalizationVersion': NORMALIZATION_VERSION, 'imageStore': {'maxImages':store.max_images,'maxBytes':store.max_bytes,'idleTtlSeconds':store.ttl_seconds}}
 
 @app.post('/images')
 async def upload(file: UploadFile = File(...)):
@@ -89,13 +116,7 @@ async def upload(file: UploadFile = File(...)):
                 raise HTTPException(400, '仅支持JPG和PNG图片')
             if source.width * source.height > MAX_PIXELS:
                 raise HTTPException(413, '解码后图片不得超过2000万像素')
-            oriented = ImageOps.exif_transpose(source)
-            rgba = oriented.convert('RGBA')
-            rgba.thumbnail((1536, 1536), Image.Resampling.LANCZOS)
-            alpha = np.asarray(rgba)[:, :, 3].copy()
-            rgb_image = Image.new('RGB', rgba.size, 'white')
-            rgb_image.paste(rgba, mask=rgba.getchannel('A'))
-            rgb = np.array(rgb_image)
+            rgba, rgb, alpha, normalization = normalize_image(source)
     except HTTPException:
         raise
     except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
@@ -103,9 +124,11 @@ async def upload(file: UploadFile = File(...)):
     image_id = uuid.uuid4().hex
     # Same lock protects predictor state, image identity and updates.
     with lock:
-        current.clear()
-        current.update(id=image_id, rgb=rgb, alpha=alpha, encoded=False)
-    return {'imageId': image_id, 'width': rgb.shape[1], 'height': rgb.shape[0], 'image': png_url(rgba)}
+        try:
+            store.put(image_id, rgb, alpha, normalization)
+        except ValueError as exc:
+            raise HTTPException(413, '图片超出当前图像存储预算，请使用较小图片或提高存储配置') from exc
+    return {'imageId': image_id, 'width': rgb.shape[1], 'height': rgb.shape[0], 'image': png_url(rgba), 'normalization':normalization}
 
 class Point(BaseModel):
     x: float
@@ -120,9 +143,8 @@ class SegmentRequest(BaseModel):
 
 @app.post('/segment')
 def segment(request: SegmentRequest):
-    with lock:
-        if current.get('id') != request.imageId:
-            raise HTTPException(409, '图片已更换，请使用当前图片重新分割')
+    global encoded_image_id
+    with lock, store.using(request.imageId) as current:
         rgb = current['rgb']
         h, w = rgb.shape[:2]
         box = np.array(request.box, dtype=float)
@@ -138,13 +160,14 @@ def segment(request: SegmentRequest):
         try:
             if predictor is not None:
                 with torch.inference_mode():
-                    if not current['encoded']:
+                    if encoded_image_id != request.imageId:
                         if device=='cuda': torch.cuda.synchronize()
                         started=time.perf_counter()
+                        encoded_image_id = None
                         predictor.set_image(rgb)
                         if device=='cuda': torch.cuda.synchronize()
                         encode_ms=(time.perf_counter()-started)*1000
-                        current['encoded']=True
+                        encoded_image_id=request.imageId
                     if device=='cuda': torch.cuda.synchronize()
                     started=time.perf_counter()
                     coords=np.array([[p.x,p.y] for p in request.points],dtype=np.float32) if request.points else None
@@ -174,9 +197,11 @@ def segment(request: SegmentRequest):
         except HTTPException:
             raise
         except Exception as exc:
+            encoded_image_id = None
             raise HTTPException(503,f'分割失败：{type(exc).__name__}: {exc}') from exc
         return {'imageId':request.imageId,'revision':request.revision,'mask':png_url(Image.fromarray(result)),'mode':mode,'device':device,'timings':{'encodeMs':round(encode_ms,2),'segmentMs':round(segment_ms,2)}}
 
 dist=ROOT.parent/'frontend/dist'
 if dist.exists():
     app.mount('/', StaticFiles(directory=dist, html=True), name='frontend')
+
