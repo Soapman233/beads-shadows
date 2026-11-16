@@ -26,3 +26,17 @@
 源码发布前运行前端17项合成数据测试、TypeScript检查与Vite构建；基础后端通过隔离CPU模式的健康检查、上传与分割验证。公开目录不包括原用户图、草稿JSON、截图、实验输出、模型、虚拟环境或个人路径。
 
 尚无轻薄本实机基准、实体拼豆校色结果或新手用户实验。照片与插画样本实验不能推导所有图像的质量。毕设后续可补充可用性实验、客观指标与实物对照。
+
+## 毕设分支更新
+```mermaid
+flowchart LR
+    A[图片导入] --> B[ICC与透明规范化]
+    B --> C[imageId有界存储]
+    C --> D[GrabCut或SAM]
+    D --> E[掩码修补]
+    E --> F[Worker取样与限色]
+    F --> G[图纸编辑]
+    G --> H[多项目与JSON备份]
+    G --> I[PNG材料CSV分块打印]
+```
+多图存储更新替代上文旧版单图生命周期描述，详见api.md；IndexedDB升级为2并保留旧draft。前端GridEditor/ProjectList/PrintView与useGeneration拆分新增交互。v4默认保留，交换优化仅为候选。

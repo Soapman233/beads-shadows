@@ -50,7 +50,7 @@ GrabCut 之外，可自行安装 [Meta SAM 2](https://github.com/facebookresearc
 
 前景掩码确定有效格子；每格取平均色，或从 RGB 分桶中提取主色。随后在离散参考色卡中选色，以 Oklab 明度、色度、色相分解的加权距离匹配，当前色相权重为 4。这是产品启发式，不是标准 Delta E，也不保证全局最优或实体零色差。参见 [架构说明](docs/architecture.md)。
 
-主色块模式可能丢失眼睛、发丝等细节；合并和整色替换也需要人工确认。MARD 数据为屏幕参考，备料请核对实体色号。当前后端仅保留一张活动图片，适合本地单用户使用；不要直接作为公开多用户服务部署。
+主色块模式可能丢失眼睛、发丝等细节；合并和整色替换也需要人工确认。MARD 数据为屏幕参考，备料请核对实体色号。当前后端使用有界多图存储，仍面向本地单用户使用；不要直接作为公开多用户服务部署。
 
 ## 检查
 
@@ -59,7 +59,7 @@ npm.cmd --prefix frontend test
 npm.cmd --prefix frontend run build
 ```
 
-目前有 17 项前端逻辑测试，覆盖配色、网格、数量、锁色、项目恢复与整色替换。CI 运行测试、类型检查、构建及后端语法检查。不包含需要 GPU、个人原图或模型的实验。
+目前有 21 项前端逻辑测试，覆盖配色、网格、数量、锁色、项目恢复与整色替换。CI 配置运行前端测试、类型检查、构建及基础CPU后端测试。不包含需要 GPU、个人原图或模型的实验。
 
 ## 目录
 
@@ -77,3 +77,22 @@ docs/        架构与验证说明
 参考 [Zippland/perler-beads](https://github.com/Zippland/perler-beads) 的制图与编辑工作流，当前工程独立实现，未引入其 AGPL 源码或色卡。第三方来源和边界见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 本项目为毕业设计阶段的 MVP。欢迎提交复现步骤、问题报告及改进建议。
+
+## 毕设开发版本
+开发分支 `graduation-complete` 新增项目列表与可恢复删除、主体掩码修补、图纸缩放/移动/连续画笔/吸色/高亮、Worker后台生成与取消、材料CSV和分块打印。高级方案含可选交换优化候选；实验不足以更换默认算法。
+
+开发实例使用8766端口，原8765版本保留。新界面无slogan。
+
+- [验收与状态](docs/acceptance.md)
+- [实际测试](docs/testing.md)、[配色实验](docs/experiments.md)
+- [数据结构](docs/data-model.md)、[接口](docs/api.md)、[算法](docs/algorithms.md)
+- [使用手册](docs/user-guide.md)、[部署](docs/deployment.md)
+- [论文初稿](thesis/draft.md)、[答辩演示](defense/demo-script.md)
+
+实验复现（仓库根目录，Python已安装基础依赖）：
+```powershell
+backend/.venv/Scripts/python.exe tests/prepare_experiments.py
+frontend/node_modules/.bin/tsx.cmd experiments/run.ts
+backend/.venv/Scripts/python.exe tests/render_experiments.py
+```
+公开样例来源见examples/dataset/SOURCES.md；geometric.png为本项目原创几何图。实验产物生成在忽略目录，私有用户回归也单独忽略。本轮未推送远端；论文属于工程初稿，真实用户实验、轻薄本和实体制作待本人完成。

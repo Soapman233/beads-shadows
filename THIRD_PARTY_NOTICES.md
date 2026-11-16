@@ -24,3 +24,9 @@ Oklab definition and published transforms: https://bottosson.github.io/posts/okl
 ## Runtime dependencies
 
 JavaScript dependency versions are recorded in frontend/package-lock.json. Python dependencies are listed in backend/requirements.txt. Dependencies remain subject to their own licenses; dependency distributions, virtual environments and node_modules are excluded from the repository.
+
+## Test dependency and demonstration images
+
+fake-indexeddb (Apache-2.0) is a development-only IndexedDB test implementation; installed via npm and recorded in package-lock.json. No source is vendored. License: https://github.com/dumbmatter/fakeIndexedDB/blob/master/LICENSE .
+
+examples/dataset contains NASA public-domain astronaut and CC0 Chelsea/coffee images; attribution and pinned source URLs are in examples/dataset/SOURCES.md. examples/geometric.png is an original synthetic fixture, covered by this project license. No private user image is included.
