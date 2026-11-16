@@ -79,7 +79,7 @@ docs/        架构与验证说明
 本项目为毕业设计阶段的 MVP。欢迎提交复现步骤、问题报告及改进建议。
 
 ## 毕设开发版本
-开发分支 `graduation-complete` 新增项目列表与可恢复删除、主体掩码修补、图纸缩放/移动/连续画笔/吸色/高亮、Worker后台生成与取消、材料CSV和分块打印。高级方案含可选交换优化候选；实验不足以更换默认算法。
+`main` 已合入本轮功能：项目列表与可恢复删除、主体掩码修补、图纸缩放/移动/连续画笔/吸色/高亮、Worker后台生成与取消、材料CSV和分块打印。高级方案含可选交换优化候选；实验不足以更换默认算法。
 
 开发实例使用8766端口，原8765版本保留。新界面无slogan。
 
@@ -95,4 +95,4 @@ backend/.venv/Scripts/python.exe tests/prepare_experiments.py
 frontend/node_modules/.bin/tsx.cmd experiments/run.ts
 backend/.venv/Scripts/python.exe tests/render_experiments.py
 ```
-公开样例来源见examples/dataset/SOURCES.md；geometric.png为本项目原创几何图。实验产物生成在忽略目录，私有用户回归也单独忽略。本轮未推送远端；论文属于工程初稿，真实用户实验、轻薄本和实体制作待本人完成。
+公开样例来源见examples/dataset/SOURCES.md；geometric.png为本项目原创几何图。实验产物生成在忽略目录，私有用户回归也单独忽略。本轮功能已同步到远端 main；论文属于工程初稿，真实用户实验、轻薄本和实体制作待本人完成。
