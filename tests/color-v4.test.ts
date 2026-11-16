@@ -18,5 +18,3 @@ test('v3 and v4 project grids coexist with capped valid colors and unchanged bea
  assert.deepEqual(p.cells.map(c=>c===null),old.cells.map(c=>c===null));assert.equal(stats(p.cells).total,stats(old.cells).total);assert.ok(p.palette.length<=8);assert.notEqual(p.algorithm,old.algorithm);
  for(const pattern of [old,p]){const data={schemaVersion:2,pattern,locked:[],points:[],step:3,pitch:2.6,selectionMode:'whole',selectionDirty:false};const restored=parseProject(JSON.stringify(data)).pattern!;assert.deepEqual(restored.cells,pattern.cells);assert.equal(restored.algorithm,pattern.algorithm)}
 });
-
-

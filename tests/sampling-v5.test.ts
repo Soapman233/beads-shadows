@@ -13,4 +13,3 @@ test('sampling metadata accepts mean/dominant only and preserves existing grids'
  for(const sampling of ['mean','dominant']){const p=validateProject({schemaVersion:2,pattern:{...pattern,sampling},points:[],locked:[],step:3,pitch:2.6,selectionMode:'whole',selectionDirty:false});assert.equal(p.pattern!.sampling,sampling);assert.deepEqual(p.pattern!.cells,pattern.cells)}
 assert.throws(()=>validateProject({schemaVersion:2,pattern:{...pattern,sampling:'mystery'},points:[]}));
 });
-

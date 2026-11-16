@@ -131,4 +131,3 @@ export function diagnoseHuePattern(rgba:Uint8ClampedArray,w:number,h:number,mask
  const measure=(p:Pattern)=>({oklab:patternError(grid,p),hue:patternHueError(grid,p)});
  return{grid,legacy,previous,v3:previous,optimized,full,errors:{legacy:measure(legacy),v3:measure(previous),optimized:measure(optimized),full:measure(full)}};
 }
-
