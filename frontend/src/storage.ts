@@ -1,0 +1,4 @@
+import {type Project} from './project';
+function db():Promise<IDBDatabase>{return new Promise((resolve,reject)=>{const r=indexedDB.open('bead-lab',1);r.onupgradeneeded=()=>r.result.createObjectStore('draft');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}
+export async function storeDraft(project:Project){const d=await db();try{await new Promise<void>((resolve,reject)=>{const t=d.transaction('draft','readwrite');t.objectStore('draft').put(project,'current');t.oncomplete=()=>resolve();t.onerror=()=>reject(t.error);t.onabort=()=>reject(t.error)})}finally{d.close()}}
+export async function readDraft():Promise<unknown>{const d=await db();try{return await new Promise((resolve,reject)=>{const r=d.transaction('draft').objectStore('draft').get('current');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)})}finally{d.close()}}
