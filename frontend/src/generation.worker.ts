@@ -12,6 +12,19 @@ self.onmessage = ({ data: v }) => {
     const result = v.constraints
       ? [
           {
+            label: "默认（同条件）",
+            pattern: generatePattern(
+              pixels,
+              v.width,
+              v.height,
+              mask,
+              v.n,
+              v.k,
+              DEFAULT_PALETTE,
+              "mean",
+            ),
+          },
+          {
             label: "细节方案",
             pattern: generateConstrainedPattern(
               pixels,

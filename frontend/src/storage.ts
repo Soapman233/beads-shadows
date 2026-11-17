@@ -92,24 +92,24 @@ export async function saveProject(row: SavedProject) {
     transaction<void>(["projects", "resources"], "readwrite", (t) => {
       const projects = t.objectStore("projects"),
         resources = t.objectStore("resources"),
-        old = projects.get(row.id);
+        old = projects.get(snapshot.id);
       old.onsuccess = () =>
         projects.put(
           {
             ...snapshot,
             thumbnail: snapshot.thumbnail ?? old.result?.thumbnail,
-            project: { ...p, source: undefined, mask: undefined },
-            hasSource: !!p.source,
-            hasMask: !!p.mask,
+            project: { ...snapshot.project, source: undefined, mask: undefined },
+            hasSource: !!snapshot.project.source,
+            hasMask: !!snapshot.project.mask,
           },
-          row.id,
+          snapshot.id,
         );
       for (const key of ["source", "mask"] as const) {
-        const id = row.id + ":" + key,
+        const id = snapshot.id + ":" + key,
           r = resources.get(id);
         r.onsuccess = () => {
-          if (p[key] !== r.result) {
-            if (p[key]) resources.put(p[key], id);
+          if (snapshot.project[key] !== r.result) {
+            if (snapshot.project[key]) resources.put(snapshot.project[key], id);
             else resources.delete(id);
           }
         };

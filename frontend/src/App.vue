@@ -16,6 +16,7 @@ import {
   planMerge,
   DEFAULT_PALETTE,
   COLOR_ALGORITHM,
+  REFINED_ALGORITHM,
   type Pattern,
 } from "./engine";
 import { type Project, parseProject } from "./project";
@@ -33,15 +34,30 @@ import ProjectList from "./ProjectList.vue";
 import { useGeneration, isGenerationCancelled } from "./useGeneration";
 import { materialsCSV } from "./materials";
 import PrintView from "./PrintView.vue";
-import { validateConstraints } from "./constraints";
+import { validateConstraints, CONSTRAINED_ALGORITHM } from "./constraints";
 import { paint } from "./canvasRenderer";
 import ColorReplace from "./ColorReplace.vue";
+import RegionPicker from "./RegionPicker.vue";
+import PalettePanel from "./PalettePanel.vue";
 const gridSelection = ref<import("./engine").GridSelection | null>(null);
 const requiredDraft = ref<string[]>([]),
   constraintError = ref("");
 const required = ref<string[]>([]),
   roi = ref<[number, number, number, number]>();
 const roiDraft = ref([0.25, 0.2, 0.75, 0.55]);
+const roiDraftChanged = ref(false);
+function resetConstraints(c?: Project["constraints"]) {
+  required.value = [...(c?.required ?? [])];
+  requiredDraft.value = [...required.value];
+  roi.value = c?.roi ? [...c.roi] : undefined;
+  roiDraft.value = c?.roi ? [...c.roi] : [0.25, 0.2, 0.75, 0.55];
+  roiDraftChanged.value = false;
+  constraintError.value = "";
+}
+const constraintsPending = computed(() => {
+  const a = [...requiredDraft.value].sort(), b = [...required.value].sort();
+  return a.length !== b.length || a.some((v,i) => v !== b[i]) || roiDraftChanged.value;
+});
 const transitioning = ref(false);
 const normalization = ref<string>();
 const projectId = ref<string>(crypto.randomUUID()),
@@ -293,9 +309,7 @@ async function restore(p: Project, row?: SavedProject) {
   saveVersion++;
   restoring = true;
   gridSelection.value = null;
-  required.value = p.constraints?.required ?? [];
-  requiredDraft.value = [...required.value];
-  roi.value = p.constraints?.roi;
+  resetConstraints(p.constraints);
   normalization.value = p.normalization;
   if (row) {
     setActiveProject(row.id);
@@ -394,7 +408,7 @@ async function upload(e: Event) {
     start = null;
     tool.value = "box";
     sourceUrl.value = v.image;
-    roi.value = undefined;
+    resetConstraints();
     normalization.value = v.normalization?.version;
     image.value = im;
     imageId.value = v.imageId;
@@ -914,13 +928,14 @@ function applyConstraints(withROI: boolean) {
     );
     required.value = c.required;
     roi.value = c.roi;
+    if (withROI) roiDraftChanged.value = false;
     constraintError.value = "";
   } catch (e) {
     constraintError.value = (e as Error).message;
   }
 }
 async function detailCandidate() {
-  if (!image.value || !mask.value) return;
+  if (!image.value || !mask.value || selectionDirty.value || processing.value || uploading.value) return;
   const rev = revision.value;
   try {
     const im = image.value;
@@ -1154,8 +1169,7 @@ async function newProject() {
     projectId.value = crypto.randomUUID();
     projectName.value = "未命名";
     normalization.value = undefined;
-    required.value = [];
-    roi.value = undefined;
+    resetConstraints();
     gridSelection.value = null;
     error.value = "";
     status.value = "导入图片";
@@ -1225,7 +1239,7 @@ async function go(n: number) {
         </button>
       </nav>
       <p
-        v-if="step === 3 && pattern && pattern.algorithm !== COLOR_ALGORITHM"
+        v-if="step === 3 && pattern && ![COLOR_ALGORITHM, REFINED_ALGORITHM, CONSTRAINED_ALGORITHM].some(v => v === pattern?.algorithm)"
         class="palette-note"
       >
         旧版配色，可在「图纸方案」重新生成。
@@ -1373,6 +1387,7 @@ async function go(n: number) {
           ><button @click="customCandidate">生成对比</button>
           <details>
             <summary>细节保护（实验）</summary>
+            <RegionPicker v-if="sourceUrl" :key="projectId" :source="sourceUrl" :model-value="roiDraft" @update:model-value="roiDraft = $event; roiDraftChanged = true" />
             <label
               >候选必选色（最多4色）<select
                 aria-label="候选必选色"
@@ -1387,6 +1402,8 @@ async function go(n: number) {
               >{{ label
               }}<input
                 type="number"
+                :aria-label="'细节区域' + label"
+                @input="roiDraftChanged = true"
                 min="0"
                 max="1"
                 step=".05"
@@ -1394,17 +1411,15 @@ async function go(n: number) {
             ><button @click="applyConstraints(true)">设细节区域</button
             ><button
               @click="
-                roi = undefined;
-                required = [];
-                requiredDraft = [];
-                constraintError = '';
+                resetConstraints();
               "
             >
               清除</button
-            ><span>{{ roi ? "已设区域" : "" }}</span
-            ><span role="status">{{ constraintError }}</span
+            ><span>{{ roi ? "已设区域" : "未应用区域" }}</span>
+            <span v-if="constraintsPending" role="status">设置待应用</span>
+            <span role="status">{{ constraintError }}</span
             ><button @click="applyConstraints(false)">应用色号</button
-            ><button @click="detailCandidate">生成细节方案</button>
+            ><button :disabled="generating || processing || uploading || selectionDirty || constraintsPending" @click="detailCandidate">生成细节方案</button>
           </details>
           <p>平滑保留过渡；色块减少混色，可能损失细线。</p>
         </details>
@@ -1490,25 +1505,7 @@ async function go(n: number) {
             @pick="chosen = $event"
             @stroke="applyStroke"
           />
-          <div class="colors">
-            <h3>颜色与用量</h3>
-            <button @click="chosen = null">橡皮擦</button>
-            <div v-for="c in pattern.palette" class="color-row">
-              <button
-                :class="{ selected: chosen === c.code }"
-                @click="chosen = c.code"
-              >
-                <i :style="{ background: c.hex }"></i>{{ c.code
-                }}<span>{{ count.counts[c.code] ?? 0 }} 颗</span></button
-              ><button
-                :aria-label="'锁定 ' + c.code"
-                :class="{ active: locked.includes(c.code) }"
-                @click="lock(c.code)"
-              >
-                {{ locked.includes(c.code) ? "已锁" : "锁色" }}
-              </button>
-            </div>
-          </div>
+          <PalettePanel :key="projectId" :pattern="pattern" :chosen="chosen" :locked="locked" @choose="chosen = $event" @lock="lock" />
         </div>
         <details class="merge-panel">
           <summary>合并少量颜色 · {{ rare.length }} 色</summary>

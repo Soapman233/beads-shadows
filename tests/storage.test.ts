@@ -91,22 +91,27 @@ test("queued writes capture caller state and retain thumbnail on metadata update
     createdAt: 1,
     updatedAt: 2,
     thumbnail: "preview",
-    project: fixture(),
+    project: {...fixture(),box:[0,0,10,10]},
   };
   const pending = saveProject(row);
+  row.id = "snapshot-mutated";
   row.name = "mutated after enqueue";
   row.project.pattern!.cells[0] = null;
+  row.project.box[2] = 99;
   await pending;
-  let saved = await loadProject(row.id);
+  let saved = await loadProject("snapshot");
+  assert.equal(saved.id,"snapshot");
   assert.equal(saved.name, "first");
   assert.deepEqual(saved.project.pattern!.cells, ["H2"]);
+  assert.deepEqual(saved.project.box,[0,0,10,10]);
+  await assert.rejects(()=>loadProject("snapshot-mutated"));
   await saveProject({
     ...saved,
     name: "renamed",
     thumbnail: undefined,
     updatedAt: 3,
   });
-  saved = await loadProject(row.id);
+  saved = await loadProject("snapshot");
   assert.equal(saved.thumbnail, "preview");
   assert.equal(saved.name, "renamed");
 });

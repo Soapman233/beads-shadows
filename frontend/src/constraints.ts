@@ -14,6 +14,7 @@ export type Constraints = {
   roi?: [number, number, number, number];
   weight?: number;
 };
+export const CONSTRAINED_ALGORITHM = "hue4-weighted-required-v1";
 export function validateConstraints(v: unknown, k = 32): Constraints {
   const c = v as Constraints;
   if (
@@ -134,7 +135,8 @@ export function generateConstrainedPattern(
     colorLimit: k,
     paletteName: DEFAULT_PALETTE_NAME,
     paletteInfo: { ...DEFAULT_PALETTE_INFO },
-    algorithm: "hue4-weighted-required-v1",
+    algorithm: CONSTRAINED_ALGORITHM,
+    sampling: "mean",
     constraints: c,
   };
 }

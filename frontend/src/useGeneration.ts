@@ -1,5 +1,6 @@
 import { ref, onBeforeUnmount } from "vue";
 import type { Pattern } from "./engine";
+import { validateConstraints } from "./constraints";
 export class GenerationCancelledError extends Error {
   constructor() {
     super("已取消");
@@ -54,6 +55,11 @@ export function useGeneration() {
           reject(error);
         };
         try {
+          // Rebuild plain arrays at the transport boundary: Vue Proxy values
+          // are valid inputs but cannot be structured-cloned by postMessage.
+          const plainConstraints = constraints
+            ? validateConstraints(constraints, k)
+            : undefined;
           current = new Worker(
             new URL("./generation.worker.ts", import.meta.url),
             { type: "module" },
@@ -83,7 +89,7 @@ export function useGeneration() {
               custom,
               n,
               k,
-              constraints,
+              constraints: plainConstraints,
             },
             [p.buffer, m.buffer],
           );

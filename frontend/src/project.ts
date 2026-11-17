@@ -182,7 +182,7 @@ export function validateProject(raw: any): Project {
     pattern,
     source,
     mask,
-    box,
+    box: box === undefined ? undefined : [...box],
     points: points.map((p: any) => ({ x: p.x, y: p.y, label: p.label })),
     locked: [...new Set<string>(locked)],
     step: pattern && raw.step !== 2 ? (raw.step ?? 3) : 1,

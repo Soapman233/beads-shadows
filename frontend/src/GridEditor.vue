@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import type { Pattern } from "./engine";
 type Point = { x: number; y: number };
 type Selection = [number, number, number, number];
@@ -15,6 +15,13 @@ const zoom = ref(1),
   tool = ref("brush"),
   highlight = ref(""),
   selection = ref<Selection | null>(null);
+const showLabels = ref(false), coarseGrid = ref(true);
+// Same numbering as PrintView: actual used colors in the project palette order.
+const used = computed(() => {
+  const codes = new Set(props.pattern.cells);
+  return props.pattern.palette.filter((c) => codes.has(c.code));
+});
+const symbols = computed(() => new Map(used.value.map((c, i) => [c.code, String(i + 1)])));
 let working: (string | null)[] | undefined,
   last: Point | undefined,
   anchor: Point | undefined;
@@ -37,6 +44,37 @@ function draw() {
     ctx.strokeRect((i % p.width) * 14, Math.floor(i / p.width) * 14, 14, 14);
   }
   ctx.globalAlpha = 1;
+  if (coarseGrid.value) {
+    // Grid strength is independent of cell highlighting and never changes cells.
+    for (let axis = 0; axis < 2; axis++) {
+      const count = axis === 0 ? p.width : p.height;
+      for (let n = 5; n < count; n += 5) {
+        ctx.beginPath();
+        ctx.strokeStyle = n % 10 === 0 ? "#111b" : "#1116";
+        ctx.lineWidth = n % 10 === 0 ? 1.4 : 0.8;
+        if (axis === 0) { ctx.moveTo(n * 14, 0); ctx.lineTo(n * 14, c.height); }
+        else { ctx.moveTo(0, n * 14); ctx.lineTo(c.width, n * 14); }
+        ctx.stroke();
+      }
+    }
+  }
+  if (showLabels.value && zoom.value >= 1.5) {
+    ctx.font = "bold 8px sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 2.5;
+    for (let i = 0; i < cells.length; i++) {
+      const code = cells[i], text = code === null ? "×" : symbols.value.get(code);
+      if (!text) continue;
+      const x = (i % p.width) * 14 + 7, y = Math.floor(i / p.width) * 14 + 7;
+      // White halo plus black lettering remains readable on any bead color.
+      ctx.strokeStyle = "#fff";
+      ctx.strokeText(text, x, y, 12);
+      ctx.fillStyle = "#111";
+      ctx.fillText(text, x, y, 12);
+    }
+  }
   if (selection.value) {
     const [x0, y0, x1, y1] = selection.value;
     ctx.strokeStyle = "#d96b00";
@@ -179,7 +217,7 @@ watch(
   { deep: true },
 );
 watch(() => [props.pattern.width, props.pattern.height], clearSelection);
-watch(highlight, draw);
+watch([highlight, showLabels, coarseGrid, zoom], draw);
 onMounted(draw);
 onBeforeUnmount(() => end());
 </script>
@@ -214,6 +252,9 @@ onBeforeUnmount(() => end());
         }}
         格</span
       >
+      <label><input type="checkbox" v-model="showLabels" />格内标记</label>
+      <label><input type="checkbox" v-model="coarseGrid" />粗网格</label>
+      <span v-if="showLabels && zoom < 1.5" role="status">放大至150%查看</span>
       <select v-model="highlight" aria-label="高亮颜色">
         <option value="">全部颜色</option>
         <option v-for="c in pattern.palette" :key="c.code" :value="c.code">
@@ -237,5 +278,12 @@ onBeforeUnmount(() => end());
         @lostpointercapture="cancel"
       />
     </div>
+    <details v-if="showLabels">
+      <summary>标记图例 · {{ used.length }} 色</summary>
+      <div style="display:flex;flex-wrap:wrap;gap:0.4rem 1rem">
+        <span v-for="c in used" :key="c.code">{{ symbols.get(c.code) }} = {{ c.code }}</span>
+        <span>× = 空格</span>
+      </div>
+    </details>
   </div>
 </template>
