@@ -59,7 +59,7 @@ npm.cmd --prefix frontend test
 npm.cmd --prefix frontend run build
 ```
 
-目前有 21 项前端逻辑测试，覆盖配色、网格、数量、锁色、项目恢复与整色替换。CI 配置运行前端测试、类型检查、构建及基础CPU后端测试。不包含需要 GPU、个人原图或模型的实验。
+目前有 28 项前端逻辑测试，覆盖配色、网格、数量、锁色、项目恢复与整色替换。CI 配置运行前端测试、类型检查、构建及基础CPU后端测试。不包含需要 GPU、个人原图或模型的实验。
 
 ## 目录
 
@@ -96,3 +96,9 @@ frontend/node_modules/.bin/tsx.cmd experiments/run.ts
 backend/.venv/Scripts/python.exe tests/render_experiments.py
 ```
 公开样例来源见examples/dataset/SOURCES.md；geometric.png为本项目原创几何图。实验产物生成在忽略目录，私有用户回归也单独忽略。本轮功能已同步到远端 main；论文属于工程初稿，真实用户实验、轻薄本和实体制作待本人完成。
+
+## 本轮可靠性、导出与约束
+
+Windows 首次安装：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1`；日常：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/start.ps1`。只为当前进程指定执行策略，不修改系统设置。现有环境可通过 `-PythonPath` 传入，独立端口用 `-Port`。详见[部署说明](docs/deployment.md)。
+
+本地分支 `iteration-reliability-quality` 包含独立项目导入、最新内容复制、事务错误保护、矩形局部换色、可选必选候选色/细节区域、黑白符号打印与一键启动。本轮尚未推送远端，main的上一轮功能不等于已包含这些新增改动。细节见[逐项交付](docs/iteration-p0-p2.md)与[18份公开输入实验](docs/iteration-experiments.md)。区域保护存在退化，默认算法保持 hue4。

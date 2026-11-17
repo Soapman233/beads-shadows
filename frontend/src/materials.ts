@@ -4,15 +4,30 @@ function csv(v: unknown) {
   if (/^[\s]*[=+@-]/.test(s)) s = "'" + s;
   return '"' + s.replaceAll('"', '""') + '"';
 }
-export function materialsCSV(p: Pattern, extra = 0) {
-  const counts = stats(p.cells).counts;
+export function materialsCSV(p: Pattern, extra = 0, name = "图纸") {
+  const { counts, total } = stats(p.cells);
   return (
     "\uFEFF" +
     [
-      ["色卡", "版本", "色号", "HEX", "实际数量", "建议备料数量"],
+      [
+        "项目",
+        "网格",
+        "总豆数",
+        "实际色数",
+        "色卡",
+        "版本",
+        "色号",
+        "HEX",
+        "实际数量",
+        "建议备料数量",
+      ],
       ...p.palette
         .filter((c) => counts[c.code])
         .map((c) => [
+          name,
+          `${p.width}×${p.height}`,
+          total,
+          Object.keys(counts).length,
           p.paletteName,
           p.paletteInfo?.version ?? "",
           c.code,

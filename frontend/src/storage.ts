@@ -10,16 +10,22 @@ export type SavedProject = {
 };
 function db(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    let blocked=false;
+    let blocked = false;
     const r = indexedDB.open("bead-lab", 2);
     r.onupgradeneeded = () => {
       for (const name of ["draft", "projects", "resources"])
         if (!r.result.objectStoreNames.contains(name))
           r.result.createObjectStore(name);
     };
-    r.onblocked = () => {blocked=true;reject(Error("请关闭其他豆影标签页后重试"))};
+    r.onblocked = () => {
+      blocked = true;
+      reject(Error("请关闭其他豆影标签页后重试"));
+    };
     r.onsuccess = () => {
-      if(blocked){r.result.close();return;}
+      if (blocked) {
+        r.result.close();
+        return;
+      }
       r.result.onversionchange = () => r.result.close();
       resolve(r.result);
     };

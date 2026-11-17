@@ -1020,9 +1020,12 @@ function download(blob: Blob, name: string) {
 function exportCSV() {
   if (pattern.value)
     download(
-      new Blob([materialsCSV(clone(pattern.value), extra.value)], {
-        type: "text/csv;charset=utf-8",
-      }),
+      new Blob(
+        [materialsCSV(clone(pattern.value), extra.value, projectName.value)],
+        {
+          type: "text/csv;charset=utf-8",
+        },
+      ),
       "materials.csv",
     );
 }
