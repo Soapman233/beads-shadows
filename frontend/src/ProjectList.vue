@@ -72,8 +72,8 @@ async function change(row: SavedProject, action: string) {
   <section class="project-list">
     <div class="panel-heading">
       <h2>项目</h2>
-      <button @click="$emit('create')">新建</button
-      ><button @click="$emit('close')">关闭</button>
+      <button :disabled="busy" @click="$emit('create')">新建</button
+      ><button :disabled="busy" @click="$emit('close')">关闭</button>
     </div>
     <p role="alert" v-if="error">{{ error }}</p>
     <div :inert="busy" v-for="r in rows" class="project-row">
@@ -81,7 +81,7 @@ async function change(row: SavedProject, action: string) {
         v-model="r.name"
         :aria-label="'项目名称 ' + r.id"
       /><button @click="change(r, 'rename')">命名</button
-      ><span>{{ r.id === current ? "当前" : "" }}</span
+      ><span>{{ r.deleted ? "回收站" : r.id === current ? "当前" : "" }}</span
       ><template v-if="!r.deleted"
         ><button @click="open(r)">打开</button
         ><button @click="change(r, 'copy')">复制</button
