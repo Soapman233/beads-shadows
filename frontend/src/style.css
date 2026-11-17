@@ -8,3 +8,5 @@
 header{height:70px;gap:18px}.brand{letter-spacing:2px}.upload{padding:9px 18px}main{padding-top:24px}.merge-panel summary{cursor:pointer;font-weight:600}.notice{padding:7px 14px}.settings .generate{margin-top:0}@media(max-width:600px){header{gap:12px}.brand{font-size:22px}.runtime{font-size:11px}.upload{padding:8px 12px}main{padding-top:18px}}
 
 .project-list{padding:16px;background:#fff;border:1px solid #ccd7c9;margin-bottom:18px}.project-row{display:flex;align-items:center;gap:8px;margin:8px 0}.project-row input{min-width:80px;width:180px}.grid-tools{display:flex;gap:8px;flex-wrap:wrap;padding:14px 22px}@media print{#app{display:none!important}@page{size:A4;margin:12mm}}
+
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid #5284ae;outline-offset:2px}.project-row{flex-wrap:wrap}.project-row img{object-fit:contain}header{flex-wrap:wrap;height:auto;min-height:70px;padding-top:10px;padding-bottom:10px}.advanced input[type=number]{width:70px}.advanced select[multiple]{height:90px;max-width:150px}.image-stage canvas{cursor:crosshair}

@@ -1,4 +1,4 @@
-"""Three permissive public images and nine original synthetic fixtures; no downloads or private copies."""
+"""Nine permissive real images and nine original synthetic fixtures; no downloads or private copies."""
 import json
 from pathlib import Path
 from PIL import Image,ImageDraw
@@ -6,6 +6,8 @@ root=Path(__file__).resolve().parents[1];out=root/'experiments/generated';out.mk
 def save(name,im,kind,source,license):
  im.thumbnail((192,192));im=im.convert('RGBA');raw=list(im.tobytes());mask=[1 if raw[i+3]>0 else 0 for i in range(0,len(raw),4)];(out/f'{name}.json').write_text(json.dumps({'width':im.width,'height':im.height,'rgba':raw,'mask':mask}));im.save(out/f'{name}.png');manifest.append({'id':name,'kind':kind,'source':source,'license':license,'public':True,'mask':'whole image effective alpha; no model segmentation'})
 for file,name,license in [('person.png','astronaut','NASA public domain'),('pet.png','chelsea','CC0, Stefan van der Walt'),('object.png','coffee','CC0, Rachel Michetti')]:save(name,Image.open(old/file),'real photo','scikit-image v0.25.2, attribution in examples/dataset/SOURCES.md',license)
+for file,name,license in [('brick.png','brick','CC0, CC0Textures'),('grass.png','grass','CC0'),('gravel.png','gravel','CC0, CC0Textures'),('camera.png','camera','CC0, Lav Varshney'),('clock.png','clock','Public domain, Stefan van der Walt'),('rocket.jpg','rocket','Public domain, SpaceX')]:
+ save(name,Image.open(old/file),'real photo','scikit-image v0.25.2, attribution in examples/dataset/SOURCES.md',license)
 for n in range(9):
  im=Image.new('RGBA',(128,128),(0,0,0,0) if n in [3,4] else 'white');d=ImageDraw.Draw(im)
  if n==0:

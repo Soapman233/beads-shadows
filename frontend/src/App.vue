@@ -1,140 +1,1560 @@
 <script setup lang="ts">
-import {ref,computed,nextTick,onMounted,watch} from 'vue';
-import {stats,canvasPoint,isCurrent,generatePattern,generateCandidates,rareColors,planMerge,DEFAULT_PALETTE,COLOR_ALGORITHM,type Pattern} from './engine';
-import {type Project,parseProject,validateProject} from './project';
-import {readDraft,saveProject,loadProject,listProjects,migrateDraft,type SavedProject} from './storage';
-import GridEditor from './GridEditor.vue';
-import ProjectList from './ProjectList.vue';
-import {useGeneration} from './useGeneration';
-import {materialsCSV} from './materials';
-import PrintView from './PrintView.vue';
-import ColorReplace from './ColorReplace.vue';
-const transitioning=ref(false);
-const normalization=ref<string>();
-const projectId=ref<string>(crypto.randomUUID()),projectName=ref('未命名'),createdAt=ref(Date.now()),showProjects=ref(false);
-const generation=useGeneration(),generating=generation.busy;const printing=ref(false),blockSize=ref(29),extra=ref(0);
-const sourceCanvas=ref<HTMLCanvasElement>(),subjectCanvas=ref<HTMLCanvasElement>(),grid=ref<HTMLCanvasElement>();
-const image=ref<HTMLImageElement>(),sourceUrl=ref<string>(),maskUrl=ref<string>(),mask=ref<Uint8Array>(),imageId=ref(''),revision=ref(0),box=ref<number[]>(),points=ref<{x:number,y:number,label:number}[]>([]);
-const maskPast=ref<Uint8Array[]>([]);let maskStroke=false;
-const showSelection=ref(true),advancedWidth=ref(64),advancedColors=ref(16);
-const step=ref(1),selectionMode=ref('object'),tool=ref('box'),selectionDirty=ref(false),uploading=ref(false),processing=ref(false),error=ref(''),status=ref('导入图片'),saveStatus=ref('尚无草稿'),pitch=ref(2.6);
-const health=ref({mode:'连接中',device:'',detail:''}),mode=ref(''),timings=ref<Record<string,number>>({});
-const candidates=ref<{label:string,pattern:Pattern}[]>([]),pattern=ref<Pattern>(),locked=ref<string[]>([]),chosen=ref<string|null>(null),dirty=ref(false),hover=ref('');
-const past=ref<string[]>([]),future=ref<string[]>([]),merge=ref<ReturnType<typeof planMerge>>();
-const count=computed(()=>stats(pattern.value?.cells??[])),rare=computed(()=>pattern.value?rareColors(pattern.value):[]);
-let start:{x:number,y:number}|null=null,timer:ReturnType<typeof setTimeout>|undefined,saveTimer:ReturnType<typeof setTimeout>|undefined,restoring=false,saveSerial=Promise.resolve();
-const clone=<T,>(v:T):T=>JSON.parse(JSON.stringify(v));
-async function api(path:string,options?:RequestInit){
- const r=await fetch('/api'+path,options),v=await r.json();
- if(!r.ok)throw Object.assign(Error(typeof v.detail==='string'?v.detail:'请求失败'),{status:r.status,code:v.code});
- return v;
-}
-const loadImage=(url:string)=>new Promise<HTMLImageElement>((resolve,reject)=>{const i=new Image();i.onload=()=>i.width>1536||i.height>1536?reject(Error('图像尺寸超过1536限制')):resolve(i);i.onerror=()=>reject(Error('无法解码图像'));i.src=url});
-function rgba(){const im=image.value!;const c=document.createElement('canvas');c.width=im.width;c.height=im.height;c.getContext('2d')!.drawImage(im,0,0);return c.getContext('2d')!.getImageData(0,0,c.width,c.height).data}
-function encodeMask(m:Uint8Array,w:number,h:number){const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d')!,d=x.createImageData(w,h);for(let i=0;i<m.length;i++)d.data.set([m[i]?255:0,m[i]?255:0,m[i]?255:0,255],i*4);x.putImageData(d,0,0);return c.toDataURL()}
-async function decodeMask(url:string,im:HTMLImageElement){const m=await loadImage(url);if(m.width!==im.width||m.height!==im.height)throw Error('掩码与源图尺寸不符');const c=document.createElement('canvas');c.width=m.width;c.height=m.height;c.getContext('2d')!.drawImage(m,0,0);const d=c.getContext('2d')!.getImageData(0,0,c.width,c.height).data;return Uint8Array.from({length:c.width*c.height},(_,i)=>d[i*4]>127?1:0)}
-function project():Project{return clone({schemaVersion:2,normalization:normalization.value,pattern:pattern.value,source:sourceUrl.value,mask:maskUrl.value,box:box.value,points:points.value,locked:locked.value,step:step.value,pitch:pitch.value,selectionMode:selectionMode.value,selectionDirty:selectionDirty.value,tuning:{width:advancedWidth.value,colors:advancedColors.value}})}
-let saveVersion=0;
-function autosave(){if(restoring||(!sourceUrl.value&&!pattern.value))return;clearTimeout(saveTimer);const version=++saveVersion;saveStatus.value='等待保存…';saveTimer=setTimeout(()=>{const value=project(),id=projectId.value,name=projectName.value,created=createdAt.value;const thumb=document.createElement('canvas');thumb.width=80;thumb.height=80;if(image.value)thumb.getContext('2d')!.drawImage(image.value,0,0,80,80);const thumbnail=thumb.toDataURL();saveSerial=saveSerial.catch(()=>{}).then(async()=>{try{await saveProject({id,name,createdAt:created,updatedAt:Date.now(),thumbnail,project:value});if(version===saveVersion&&id===projectId.value)saveStatus.value='已自动保存'}catch{saveStatus.value='保存失败，请使用「保存项目」备份'}})},450)}
-watch([projectName,sourceUrl,maskUrl,pattern,points,box,locked,step,pitch,selectionMode,selectionDirty,advancedWidth,advancedColors],autosave,{deep:true});
-async function restore(p:Project,row?:SavedProject){maskStroke=false;start=null;tool.value='box';generation.cancel();const token=++revision.value;const im=p.source?await loadImage(p.source):undefined,m=p.mask&&im?await decodeMask(p.mask,im):undefined;if(im&&(p.points.some(q=>q.x>=im.width||q.y>=im.height)||(p.box&&(p.box[2]>im.width||p.box[3]>im.height))))throw Error('提示坐标超出图片范围');if(token!==revision.value)return;clearTimeout(timer);clearTimeout(saveTimer);saveVersion++;restoring=true;normalization.value=p.normalization;if(row){projectId.value=row.id;projectName.value=row.name;createdAt.value=row.createdAt}sourceUrl.value=p.source;image.value=im;mask.value=m;maskUrl.value=p.mask;imageId.value='';box.value=p.box;points.value=p.points;pattern.value=p.pattern;locked.value=p.locked;step.value=p.step;pitch.value=p.pitch;advancedWidth.value=p.tuning?.width??64;advancedColors.value=p.tuning?.colors??16;selectionMode.value=p.selectionMode;selectionDirty.value=p.selectionDirty;past.value=[];future.value=[];maskPast.value=[];candidates.value=[];merge.value=undefined;chosen.value=p.pattern?.palette[0]?.code??null;dirty.value=false;await nextTick();restoring=false;drawAll();status.value=im?'项目已恢复':'已打开图纸（无原图）';autosave()}
-onMounted(()=>{void api('/health').then(v=>health.value=v).catch(()=>health.value={mode:'服务未连接',device:'',detail:'已保存图纸仍可编辑；提取主体需要本地服务'});void (async()=>{try{await migrateDraft();const rows=await listProjects(),row=rows.find(r=>!r.deleted);if(row&&revision.value===0){const full=await loadProject(row.id);if(revision.value===0)await restore(full.project,row)}}catch{saveStatus.value='草稿恢复失败，可打开已导出的项目'}})()});
-const replacement=ref(false);let resolveReplacement:((v:boolean)=>void)|undefined;function allowReplace():Promise<boolean>{resolveReplacement?.(false);resolveReplacement=undefined;if(!dirty.value)return Promise.resolve(true);replacement.value=true;return new Promise(r=>resolveReplacement=r)}function confirmReplace(v:boolean){replacement.value=false;resolveReplacement?.(v);resolveReplacement=undefined}
-async function upload(e:Event){const f=(e.target as HTMLInputElement).files?.[0];if(!f||!await allowReplace())return;if(f.size>20*1024*1024){error.value='图片请小于20MB';return}generation.cancel();const rev=++revision.value;uploading.value=true;clearTimeout(timer);try{const form=new FormData();form.append('file',f);const v=await api('/images',{method:'POST',body:form}),im=await loadImage(v.image);if(rev!==revision.value)return;maskPast.value=[];maskStroke=false;start=null;tool.value='box';sourceUrl.value=v.image;normalization.value=v.normalization?.version;image.value=im;imageId.value=v.imageId;mask.value=undefined;maskUrl.value=undefined;box.value=undefined;points.value=[];pattern.value=undefined;candidates.value=[];past.value=[];future.value=[];locked.value=[];merge.value=undefined;dirty.value=false;step.value=1;selectionDirty.value=false;error.value='';selectionMode.value='object';status.value=rgba().some((v,i)=>i%4===3&&v<128)?'图片包含透明区域，可选择「整张图片」直接制图。':'选择整图，或框选主体';await nextTick();drawAll()}catch(e){error.value=(e as Error).message}finally{uploading.value=false}(e.target as HTMLInputElement).value=''}
-function whole(){maskPast.value=[];generation.cancel();revision.value++;clearTimeout(timer);selectionMode.value='whole';const d=rgba(),im=image.value!;mask.value=Uint8Array.from({length:im.width*im.height},(_,i)=>d[i*4+3]>=128?1:0);maskUrl.value=encodeMask(mask.value,im.width,im.height);selectionDirty.value=false;candidates.value=[];mode.value='整图制图 · 未调用分割';drawAll();status.value='已选择整图'}
-function objectMode(){generation.cancel();selectionMode.value='object';selectionDirty.value=true;revision.value++;candidates.value=[];if(box.value)schedule();status.value='框选主体，松手提取'}
-function drawAll(){drawSource();const c=subjectCanvas.value,im=image.value,m=mask.value;if(c){c.width=im?.width??300;c.height=im?.height??200;if(im&&m){const x=c.getContext('2d')!;x.drawImage(im,0,0);const d=x.getImageData(0,0,c.width,c.height);for(let i=0;i<m.length;i++)if(!m[i])d.data[i*4+3]=0;x.putImageData(d,0,0)}}drawGrid()}
-function drawSource(){const c=sourceCanvas.value,im=image.value;if(!c||!im)return;c.width=im.width;c.height=im.height;const x=c.getContext('2d')!;x.drawImage(im,0,0);if(showSelection.value&&mask.value&&!selectionDirty.value){x.fillStyle='#2baf8060';for(let y=0;y<im.height;y++)for(let xx=0;xx<im.width;xx++)if(mask.value[y*im.width+xx])x.fillRect(xx,y,1,1)}const scale=im.width/(c.getBoundingClientRect().width||im.width);if(box.value&&selectionMode.value==='object'){x.strokeStyle='#f3a443';x.lineWidth=2*scale;x.strokeRect(box.value[0],box.value[1],box.value[2]-box.value[0],box.value[3]-box.value[1])}for(const p of points.value){x.fillStyle=p.label?'#19b885':'#ee6058';x.beginPath();x.arc(p.x,p.y,5*scale,0,Math.PI*2);x.fill()}}
-function pos(e:PointerEvent){const im=image.value!;return canvasPoint(e.clientX,e.clientY,sourceCanvas.value!.getBoundingClientRect(),im.width,im.height)}
-function changed(){generation.cancel();revision.value++;selectionDirty.value=true;candidates.value=[];merge.value=undefined;drawSource();schedule()}
-function maskPaint(e:PointerEvent){const im=image.value!,p=pos(e),m=mask.value!;for(let y=Math.max(0,Math.floor(p.y)-12);y<Math.min(im.height,p.y+13);y++)for(let x=Math.max(0,Math.floor(p.x)-12);x<Math.min(im.width,p.x+13);x++)if((x-p.x)**2+(y-p.y)**2<=144)m[y*im.width+x]=tool.value==='mask-add'?1:0;drawAll()}
-function maskUndo(){if(!maskPast.value.length||!image.value)return;if(maskPast.value.at(-1)!.length!==image.value.width*image.value.height){maskPast.value=[];return}generation.cancel();revision.value++;mask.value=maskPast.value.pop();maskUrl.value=encodeMask(mask.value!,image.value.width,image.value.height);candidates.value=[];drawAll()}
-function down(e:PointerEvent){if(tool.value.startsWith('mask-')&&mask.value){maskPast.value.push(mask.value.slice());if(maskPast.value.length>10)maskPast.value.shift();maskStroke=true;generation.cancel();revision.value++;candidates.value=[];clearTimeout(timer);sourceCanvas.value!.setPointerCapture(e.pointerId);maskPaint(e);return}if(!image.value||uploading.value||selectionMode.value!=='object')return;const p=pos(e);if(tool.value==='box'){start=p;revision.value++;selectionDirty.value=true;sourceCanvas.value!.setPointerCapture(e.pointerId)}else if(box.value){points.value.push({...p,label:tool.value==='keep'?1:0});changed()}}
-function move(e:PointerEvent){if(maskStroke){maskPaint(e);return}if(!start)return;const p=pos(e);box.value=[Math.min(start.x,p.x),Math.min(start.y,p.y),Math.max(start.x,p.x),Math.max(start.y,p.y)];drawSource()}
-function up(){if(maskStroke){maskStroke=false;selectionDirty.value=false;maskUrl.value=encodeMask(mask.value!,image.value!.width,image.value!.height);dirty.value=true;return}if(!start)return;start=null;points.value=[];if(box.value&&(box.value[2]-box.value[0]<3||box.value[3]-box.value[1]<3))box.value=undefined;changed()}
-function removePoint(){points.value.pop();changed()}
-function schedule(){clearTimeout(timer);timer=setTimeout(segment,300)}
-async function segment(){
- if(processing.value||!box.value||selectionMode.value!=='object'||!image.value||!sourceUrl.value||start)return;
- const rev=revision.value,src=sourceUrl.value,im=image.value;
- const selectedBox=box.value.map(Math.round),selectedPoints=points.value.map(p=>({...p,x:Math.round(p.x),y:Math.round(p.y)}));
- const current=()=>rev===revision.value&&src===sourceUrl.value&&im===image.value&&selectionMode.value==='object';
- processing.value=true;error.value='';
- try{
-  const register=async()=>{
-   if(!current())return undefined;
-   const blob=await(await fetch(src)).blob();
-   if(!current())return undefined;
-   const f=new FormData();f.append('file',blob,'restored.png');
-   const uploaded=await api('/images',{method:'POST',body:f});
-   if(!current())return undefined;
-   imageId.value=uploaded.imageId;
-   return uploaded.imageId as string;
-  };
-  let id=imageId.value;
-  if(!id){const registered=await register();if(!registered)return;id=registered}
-  if(!current())return;
-  const request=(requestId:string)=>api('/segment',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({imageId:requestId,box:selectedBox,points:selectedPoints,revision:rev})});
-  let v;
-  try{v=await request(id)}catch(e){
-   if(!current())return;
-   if(![404,410].includes((e as Error&{status?:number}).status??0))throw e;
-   imageId.value='';
-   const registered=await register();if(!registered)return;
-   id=registered;
-   // One recovery retry only; a second expiry/error reaches the outer handler.
-   v=await request(id);
+import { GRID_WIDTHS, COLOR_LIMITS } from "./config";
+import {
+  ref,
+  computed,
+  nextTick,
+  onMounted,
+  watch,
+  onBeforeUnmount,
+} from "vue";
+import {
+  stats,
+  canvasPoint,
+  isCurrent,
+  rareColors,
+  planMerge,
+  DEFAULT_PALETTE,
+  COLOR_ALGORITHM,
+  type Pattern,
+} from "./engine";
+import { type Project, parseProject } from "./project";
+import {
+  getActiveProject,
+  setActiveProject,
+  saveProject,
+  loadProject,
+  listProjects,
+  migrateDraft,
+  type SavedProject,
+} from "./storage";
+import GridEditor from "./GridEditor.vue";
+import ProjectList from "./ProjectList.vue";
+import { useGeneration, isGenerationCancelled } from "./useGeneration";
+import { materialsCSV } from "./materials";
+import PrintView from "./PrintView.vue";
+import { validateConstraints } from "./constraints";
+import { paint } from "./canvasRenderer";
+import ColorReplace from "./ColorReplace.vue";
+const gridSelection = ref<import("./engine").GridSelection | null>(null);
+const requiredDraft = ref<string[]>([]),
+  constraintError = ref("");
+const required = ref<string[]>([]),
+  roi = ref<[number, number, number, number]>();
+const roiDraft = ref([0.25, 0.2, 0.75, 0.55]);
+const transitioning = ref(false);
+const normalization = ref<string>();
+const projectId = ref<string>(crypto.randomUUID()),
+  projectName = ref("未命名"),
+  createdAt = ref(Date.now()),
+  showProjects = ref(false);
+const exportSnapshot = ref<Pattern>(),
+  exportName = ref("");
+function openPrint() {
+  if (pattern.value) {
+    exportSnapshot.value = clone(pattern.value);
+    exportName.value = projectName.value;
+    printing.value = true;
   }
-  if(!current()||!isCurrent(v.imageId,v.revision,imageId.value,revision.value))return;
-  const m=await decodeMask(v.mask,im);
-  if(!current()||!isCurrent(v.imageId,v.revision,imageId.value,revision.value))return;
-  maskPast.value=[];mask.value=m;maskUrl.value=v.mask;selectionDirty.value=false;mode.value=v.mode;timings.value=v.timings;status.value='主体已提取，可补选或去除';drawAll();
- }catch(e){
-  if(current()){
-   error.value=(e as Error).message;status.value='提取失败，可重试或改用整张图片。';
-   if([404,409,410].includes((e as Error&{status?:number}).status??0))imageId.value='';
-  }
- }finally{
-  processing.value=false;
-  if(rev!==revision.value&&selectionMode.value==='object'&&selectionDirty.value)schedule();
- }
 }
-async function makeCandidates(){if(!mask.value||selectionDirty.value)return;try{const rev=revision.value;const t=performance.now(),im=image.value!;const out=await generation.run(rgba(),mask.value,im.width,im.height);if(rev!==revision.value)return;candidates.value=out;timings.value={...timings.value,candidatesMs:performance.now()-t};step.value=2;await nextTick();drawCandidates();error.value=''}catch(e){error.value=(e as Error).message}}
-function drawCandidates(){document.querySelectorAll<HTMLCanvasElement>('.candidate canvas.pattern-preview').forEach((c,i)=>paint(c,candidates.value[i].pattern,6));document.querySelectorAll<HTMLCanvasElement>('.candidate canvas.original-preview').forEach((c,i)=>drawOriginal(c,candidates.value[i].pattern))}
-function drawOriginal(c:HTMLCanvasElement,p:Pattern){const im=image.value,m=mask.value;if(!im||!m)return;const d=rgba();let x0=im.width,y0=im.height,x1=-1,y1=-1;for(let y=0;y<im.height;y++)for(let x=0;x<im.width;x++)if(m[y*im.width+x]&&d[(y*im.width+x)*4+3]){x0=Math.min(x0,x);y0=Math.min(y0,y);x1=Math.max(x1,x);y1=Math.max(y1,y)}if(x1<0)return;const pad=Math.max(1,Math.round(Math.max(x1-x0+1,y1-y0+1)*.025));x0=Math.max(0,x0-pad);y0=Math.max(0,y0-pad);x1=Math.min(im.width,x1+pad+1);y1=Math.min(im.height,y1+pad+1);const tmp=document.createElement('canvas');tmp.width=im.width;tmp.height=im.height;const tx=tmp.getContext('2d')!,data=tx.createImageData(im.width,im.height);data.data.set(d);for(let i=0;i<m.length;i++)if(!m[i])data.data[i*4+3]=0;tx.putImageData(data,0,0);c.width=p.width*6;c.height=p.height*6;const ctx=c.getContext('2d')!;ctx.fillStyle='#edf0ea';ctx.fillRect(0,0,c.width,c.height);ctx.drawImage(tmp,x0,y0,x1-x0,y1-y0,0,0,c.width,c.height)}
-async function customCandidate(){if(!image.value||!mask.value||selectionDirty.value)return;try{const im=image.value,t=performance.now();const pixels=rgba(),rev=revision.value;const result=await generation.run(pixels,mask.value,im.width,im.height,true,advancedWidth.value,advancedColors.value);if(rev!==revision.value)return;candidates.value=result;timings.value={...timings.value,customMs:performance.now()-t};await nextTick();drawCandidates()}catch(e){error.value=(e as Error).message}}
-async function choose(p:Pattern){if(!await allowReplace())return;pattern.value=clone(p);locked.value=[];dirty.value=false;past.value=[];future.value=[];merge.value=undefined;chosen.value=p.palette[0]?.code??null;step.value=3;await nextTick();drawGrid()}
-function snapshot(){return JSON.stringify({pattern:pattern.value,locked:locked.value})}
-function checkpoint(){past.value.push(snapshot());if(past.value.length>20)past.value.shift();future.value=[];merge.value=undefined;dirty.value=true}
-function undo(redo=false){const from=redo?future:past,to=redo?past:future;const v=from.value.pop();if(!v)return;to.value.push(snapshot());const s=JSON.parse(v);pattern.value=s.pattern;locked.value=s.locked;chosen.value=s.pattern.palette[0]?.code??null;merge.value=undefined;dirty.value=true;drawGrid()}
-function applyStroke(cells:(string|null)[]){checkpoint();pattern.value={...pattern.value!,cells};}
-function edit(e:MouseEvent){const p=pattern.value!,c=grid.value!,v=canvasPoint(e.clientX,e.clientY,c.getBoundingClientRect(),p.width,p.height),i=Math.floor(v.y)*p.width+Math.floor(v.x);if(p.cells[i]===chosen.value)return;checkpoint();p.cells[i]=chosen.value;drawGrid()}
-function lock(code:string){checkpoint();locked.value=locked.value.includes(code)?locked.value.filter(c=>c!==code):[...locked.value,code]}
-async function suggest(){if(!pattern.value)return;merge.value=planMerge(pattern.value,locked.value);await nextTick();const c=document.querySelector<HTMLCanvasElement>('#merge-preview');if(c)paint(c,merge.value.pattern,5)}
-function applyColorReplace(p:Pattern){checkpoint();pattern.value=clone(p);chosen.value=p.palette[0]?.code??null;status.value='已替换，可撤销';drawGrid()}
-function applyMerge(){if(!merge.value?.affected)return;const p=clone(merge.value.pattern);checkpoint();pattern.value=p;chosen.value=p.palette[0]?.code??null;drawGrid()}
-function paint(c:HTMLCanvasElement,p:Pattern,size=14,exporting=false){const margin=exporting?30:0,used=stats(p.cells),legend=exporting?80+Math.ceil(p.palette.length/4)*28:0;c.width=p.width*size+margin*2;c.height=p.height*size+margin*2+legend;const x=c.getContext('2d')!;x.fillStyle='white';x.fillRect(0,0,c.width,c.height);for(let j=0;j<p.height;j++)for(let i=0;i<p.width;i++){const code=p.cells[j*p.width+i],col=p.palette.find(c=>c.code===code),xx=margin+i*size,yy=margin+j*size;x.fillStyle=col?.hex??'#edf0ea';x.fillRect(xx,yy,size,size);if(size>=10){x.strokeStyle='#0002';x.lineWidth=.5;x.strokeRect(xx,yy,size,size)}if(exporting&&col){const h=col.hex;x.fillStyle=(parseInt(h.slice(1,3),16)*.299+parseInt(h.slice(3,5),16)*.587+parseInt(h.slice(5),16)*.114)>145?'#15201c':'white';x.font='10px sans-serif';x.textAlign='center';x.fillText(code!,xx+size/2,yy+19)}}if(exporting){x.font='10px sans-serif';x.fillStyle='#20372e';x.textAlign='center';for(let i=0;i<p.width;i++)x.fillText(String(i+1),margin+i*size+size/2,18);for(let j=0;j<p.height;j++)x.fillText(String(j+1),14,margin+j*size+20);x.strokeStyle='#344e43';x.lineWidth=1.5;for(let i=0;i<=p.width;i+=5){x.beginPath();x.moveTo(margin+i*size,margin);x.lineTo(margin+i*size,margin+p.height*size);x.stroke()}for(let j=0;j<=p.height;j+=5){x.beginPath();x.moveTo(margin,margin+j*size);x.lineTo(margin+p.width*size,margin+j*size);x.stroke()}x.textAlign='left';x.font='14px sans-serif';x.fillText(`${p.width} x ${p.height} | ${used.total} beads | ${p.paletteName}`,15,margin*2+p.height*size+25);p.palette.forEach((col,i)=>{const xx=(i%4)*c.width/4+15,yy=margin*2+p.height*size+55+Math.floor(i/4)*28;x.fillStyle=col.hex;x.fillRect(xx,yy-12,14,14);x.fillStyle='#20372e';x.fillText(`${col.code} x ${used.counts[col.code]??0}`,xx+20,yy)})}}
-function drawGrid(){if(grid.value&&pattern.value)paint(grid.value,pattern.value)}
-function hoverCell(e:MouseEvent){const p=pattern.value!,v=canvasPoint(e.clientX,e.clientY,grid.value!.getBoundingClientRect(),p.width,p.height);hover.value=`第${Math.floor(v.y)+1}行 第${Math.floor(v.x)+1}列 · ${p.cells[Math.floor(v.y)*p.width+Math.floor(v.x)]??'空格'}`}
-function download(blob:Blob,name:string){const u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(u),1000)}
-function exportCSV(){if(pattern.value)download(new Blob([materialsCSV(pattern.value,extra.value)],{type:'text/csv;charset=utf-8'}),'materials.csv')}
-function exportPNG(){if(!pattern.value)return;const c=document.createElement('canvas');paint(c,pattern.value,30,true);c.toBlob(b=>b&&download(b,'bead-pattern-v2.png'))}
-function exportProject(){download(new Blob([JSON.stringify({...project(),statistics:count.value})],{type:'application/json'}),'bead-project-v2.json')}
-async function openProject(e:Event){const f=(e.target as HTMLInputElement).files?.[0];if(!f)return;try{if(f.size>50_000_000)throw Error('项目文件过大');const p=parseProject(await f.text());if(!await allowReplace())return;await restore(p);error.value=''}catch(e){error.value=(e as Error).message}(e.target as HTMLInputElement).value=''}
-async function flushProject(){clearTimeout(saveTimer);saveVersion++;await saveSerial;if(sourceUrl.value||pattern.value)await saveProject({id:projectId.value,name:projectName.value,createdAt:createdAt.value,updatedAt:Date.now(),project:project()})}
-async function switchProject(row:SavedProject){if(transitioning.value)return;transitioning.value=true;try{await flushProject();await restore(row.project,row);showProjects.value=false;autosave()}catch(e){error.value=(e as Error).message}finally{transitioning.value=false}}
-async function newProject(){if(transitioning.value)return;transitioning.value=true;try{maskStroke=false;start=null;tool.value='box';await flushProject();generation.cancel();revision.value++;clearTimeout(timer);sourceUrl.value=undefined;maskUrl.value=undefined;image.value=undefined;mask.value=undefined;maskPast.value=[];pattern.value=undefined;imageId.value='';box.value=undefined;points.value=[];locked.value=[];candidates.value=[];past.value=[];future.value=[];dirty.value=false;selectionDirty.value=false;step.value=1;projectId.value=crypto.randomUUID();projectName.value='未命名';normalization.value=undefined;error.value='';status.value='导入图片';saveStatus.value='新项目';createdAt.value=Date.now();showProjects.value=false;clearTimeout(saveTimer);await nextTick();drawAll()}catch(e){error.value=(e as Error).message}finally{transitioning.value=false}}
-async function go(n:number){step.value=n;await nextTick();drawAll()}
+const generation = useGeneration(),
+  generating = generation.busy;
+const printing = ref(false),
+  blockSize = ref(29),
+  extra = ref(0);
+const sourceCanvas = ref<HTMLCanvasElement>(),
+  subjectCanvas = ref<HTMLCanvasElement>();
+const image = ref<HTMLImageElement>(),
+  sourceUrl = ref<string>(),
+  maskUrl = ref<string>(),
+  mask = ref<Uint8Array>(),
+  imageId = ref(""),
+  revision = ref(0),
+  box = ref<number[]>(),
+  points = ref<{ x: number; y: number; label: number }[]>([]);
+const maskPast = ref<Uint8Array[]>([]);
+let maskStroke = false;
+let maskPointer: number | undefined;
+const maskRadius = ref(12);
+let maskLast: { x: number; y: number } | undefined;
+const showSelection = ref(true),
+  advancedWidth = ref(64),
+  advancedColors = ref(16);
+const step = ref(1),
+  selectionMode = ref("object"),
+  tool = ref("box"),
+  selectionDirty = ref(false),
+  uploading = ref(false),
+  processing = ref(false),
+  error = ref(""),
+  status = ref("导入图片"),
+  saveStatus = ref("尚无草稿"),
+  pitch = ref(2.6);
+const health = ref({ mode: "连接中", device: "", detail: "" }),
+  mode = ref(""),
+  timings = ref<Record<string, number>>({});
+const candidates = ref<{ label: string; pattern: Pattern }[]>([]),
+  pattern = ref<Pattern>(),
+  locked = ref<string[]>([]),
+  chosen = ref<string | null>(null),
+  dirty = ref(false);
+const past = ref<string[]>([]),
+  future = ref<string[]>([]),
+  merge = ref<ReturnType<typeof planMerge>>();
+const count = computed(() => stats(pattern.value?.cells ?? [])),
+  rare = computed(() => (pattern.value ? rareColors(pattern.value) : []));
+let start: { x: number; y: number } | null = null,
+  timer: ReturnType<typeof setTimeout> | undefined,
+  saveTimer: ReturnType<typeof setTimeout> | undefined,
+  restoring = false,
+  saveSerial = Promise.resolve();
+const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
+async function api(path: string, options?: RequestInit) {
+  const r = await fetch("/api" + path, options),
+    v = await r.json();
+  if (!r.ok)
+    throw Object.assign(
+      Error(typeof v.detail === "string" ? v.detail : "请求失败"),
+      { status: r.status, code: v.code },
+    );
+  return v;
+}
+const loadImage = (url: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const i = new Image();
+    i.onload = () =>
+      i.width > 1536 || i.height > 1536
+        ? reject(Error("图像尺寸超过1536限制"))
+        : resolve(i);
+    i.onerror = () => reject(Error("无法解码图像"));
+    i.src = url;
+  });
+function rgba() {
+  const im = image.value!;
+  const c = document.createElement("canvas");
+  c.width = im.width;
+  c.height = im.height;
+  c.getContext("2d")!.drawImage(im, 0, 0);
+  return c.getContext("2d")!.getImageData(0, 0, c.width, c.height).data;
+}
+function encodeMask(m: Uint8Array, w: number, h: number) {
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const x = c.getContext("2d")!,
+    d = x.createImageData(w, h);
+  for (let i = 0; i < m.length; i++)
+    d.data.set([m[i] ? 255 : 0, m[i] ? 255 : 0, m[i] ? 255 : 0, 255], i * 4);
+  x.putImageData(d, 0, 0);
+  return c.toDataURL();
+}
+async function decodeMask(url: string, im: HTMLImageElement) {
+  const m = await loadImage(url);
+  if (m.width !== im.width || m.height !== im.height)
+    throw Error("掩码与源图尺寸不符");
+  const c = document.createElement("canvas");
+  c.width = m.width;
+  c.height = m.height;
+  c.getContext("2d")!.drawImage(m, 0, 0);
+  const d = c.getContext("2d")!.getImageData(0, 0, c.width, c.height).data;
+  return Uint8Array.from({ length: c.width * c.height }, (_, i) =>
+    d[i * 4] > 127 ? 1 : 0,
+  );
+}
+function project(): Project {
+  return clone({
+    schemaVersion: 2,
+    constraints: { required: required.value, roi: roi.value, weight: 3 },
+    normalization: normalization.value,
+    pattern: pattern.value,
+    source: sourceUrl.value,
+    mask: maskUrl.value,
+    box: box.value,
+    points: points.value,
+    locked: locked.value,
+    step: step.value,
+    pitch: pitch.value,
+    selectionMode: selectionMode.value,
+    selectionDirty: selectionDirty.value,
+    tuning: { width: advancedWidth.value, colors: advancedColors.value },
+  });
+}
+let saveVersion = 0;
+function thumbnail() {
+  if (!image.value) return undefined;
+  const c = document.createElement("canvas");
+  c.width = 80;
+  c.height = 80;
+  const scale = Math.min(80 / image.value.width, 80 / image.value.height),
+    w = image.value.width * scale,
+    h = image.value.height * scale;
+  c.getContext("2d")!.drawImage(image.value, (80 - w) / 2, (80 - h) / 2, w, h);
+  return c.toDataURL();
+}
+function queueSave() {
+  const value = project(),
+    id = projectId.value,
+    name = projectName.value,
+    created = createdAt.value,
+    version = saveVersion,
+    thumb = thumbnail();
+  const task = saveSerial
+    .catch(() => {})
+    .then(() =>
+      saveProject({
+        id,
+        name,
+        createdAt: created,
+        updatedAt: Date.now(),
+        thumbnail: thumb,
+        project: value,
+      }),
+    );
+  saveSerial = task;
+  void task.then(
+    () => {
+      if (id === projectId.value && version === saveVersion) {
+        saveStatus.value = "已自动保存";
+        setActiveProject(id);
+      }
+    },
+    () => {
+      if (id === projectId.value && version === saveVersion)
+        saveStatus.value = "保存失败，请下载项目备份";
+    },
+  );
+  return task;
+}
+function autosave() {
+  if (restoring || (!sourceUrl.value && !pattern.value)) return;
+  clearTimeout(saveTimer);
+  saveVersion++;
+  saveStatus.value = "等待保存…";
+  saveTimer = setTimeout(() => {
+    void queueSave().catch(() => {});
+  }, 450);
+}
+function beforeLeave(e: BeforeUnloadEvent) {
+  if (saveStatus.value.includes("等待") || saveStatus.value.includes("失败")) {
+    e.preventDefault();
+    e.returnValue = "";
+  }
+}
+window.addEventListener("beforeunload", beforeLeave);
+onBeforeUnmount(() => window.removeEventListener("beforeunload", beforeLeave));
+watch(
+  [advancedWidth, advancedColors, required, roi],
+  () => {
+    generation.cancel();
+    revision.value++;
+    candidates.value = [];
+    drawSource();
+  },
+  { deep: true },
+);
+watch(
+  [
+    projectName,
+    sourceUrl,
+    maskUrl,
+    pattern,
+    points,
+    box,
+    locked,
+    step,
+    pitch,
+    selectionMode,
+    selectionDirty,
+    advancedWidth,
+    advancedColors,
+    required,
+    roi,
+  ],
+  autosave,
+  { deep: true },
+);
+async function restore(p: Project, row?: SavedProject) {
+  maskStroke = false;
+  start = null;
+  tool.value = "box";
+  generation.cancel();
+  const token = ++revision.value;
+  const im = p.source ? await loadImage(p.source) : undefined,
+    m = p.mask && im ? await decodeMask(p.mask, im) : undefined;
+  if (
+    im &&
+    (p.points.some((q) => q.x >= im.width || q.y >= im.height) ||
+      (p.box && (p.box[2] > im.width || p.box[3] > im.height)))
+  )
+    throw Error("提示坐标超出图片范围");
+  if (token !== revision.value) return;
+  clearTimeout(timer);
+  clearTimeout(saveTimer);
+  saveVersion++;
+  restoring = true;
+  gridSelection.value = null;
+  required.value = p.constraints?.required ?? [];
+  requiredDraft.value = [...required.value];
+  roi.value = p.constraints?.roi;
+  normalization.value = p.normalization;
+  if (row) {
+    setActiveProject(row.id);
+    projectId.value = row.id;
+    projectName.value = row.name;
+    createdAt.value = row.createdAt;
+  }
+  sourceUrl.value = p.source;
+  image.value = im;
+  mask.value = m;
+  maskUrl.value = p.mask;
+  imageId.value = "";
+  box.value = p.box;
+  points.value = p.points;
+  pattern.value = p.pattern;
+  locked.value = p.locked;
+  step.value = p.step;
+  pitch.value = p.pitch;
+  advancedWidth.value = p.tuning?.width ?? 64;
+  advancedColors.value = p.tuning?.colors ?? 16;
+  selectionMode.value = p.selectionMode;
+  selectionDirty.value = p.selectionDirty;
+  past.value = [];
+  future.value = [];
+  maskPast.value = [];
+  candidates.value = [];
+  merge.value = undefined;
+  chosen.value = p.pattern?.palette[0]?.code ?? null;
+  dirty.value = false;
+  await nextTick();
+  restoring = false;
+  drawAll();
+  status.value = im ? "项目已恢复" : "已打开图纸（无原图）";
+  autosave();
+}
+onMounted(() => {
+  void api("/health")
+    .then((v) => (health.value = v))
+    .catch(
+      () =>
+        (health.value = {
+          mode: "服务未连接",
+          device: "",
+          detail: "已保存图纸仍可编辑；提取主体需要本地服务",
+        }),
+    );
+  void (async () => {
+    try {
+      await migrateDraft();
+      const rows = await listProjects(),
+        row =
+          rows.find((r) => r.id === getActiveProject() && !r.deleted) ??
+          rows.find((r) => !r.deleted);
+      if (row && revision.value === 0) {
+        const full = await loadProject(row.id);
+        if (revision.value === 0) await restore(full.project, row);
+      }
+    } catch {
+      saveStatus.value = "草稿恢复失败，可打开已导出的项目";
+    }
+  })();
+});
+const replacement = ref(false);
+let resolveReplacement: ((v: boolean) => void) | undefined;
+function allowReplace(): Promise<boolean> {
+  resolveReplacement?.(false);
+  resolveReplacement = undefined;
+  if (!dirty.value) return Promise.resolve(true);
+  replacement.value = true;
+  return new Promise((r) => (resolveReplacement = r));
+}
+function confirmReplace(v: boolean) {
+  replacement.value = false;
+  resolveReplacement?.(v);
+  resolveReplacement = undefined;
+}
+async function upload(e: Event) {
+  const f = (e.target as HTMLInputElement).files?.[0];
+  if (!f || !(await allowReplace())) return;
+  if (f.size > 20 * 1024 * 1024) {
+    error.value = "图片请小于20MB";
+    return;
+  }
+  generation.cancel();
+  const rev = ++revision.value;
+  uploading.value = true;
+  clearTimeout(timer);
+  try {
+    const form = new FormData();
+    form.append("file", f);
+    const v = await api("/images", { method: "POST", body: form }),
+      im = await loadImage(v.image);
+    if (rev !== revision.value) return;
+    maskPast.value = [];
+    maskStroke = false;
+    start = null;
+    tool.value = "box";
+    sourceUrl.value = v.image;
+    roi.value = undefined;
+    normalization.value = v.normalization?.version;
+    image.value = im;
+    imageId.value = v.imageId;
+    mask.value = undefined;
+    maskUrl.value = undefined;
+    box.value = undefined;
+    points.value = [];
+    pattern.value = undefined;
+    candidates.value = [];
+    past.value = [];
+    future.value = [];
+    locked.value = [];
+    merge.value = undefined;
+    dirty.value = false;
+    step.value = 1;
+    selectionDirty.value = false;
+    error.value = "";
+    selectionMode.value = "object";
+    status.value = rgba().some((v, i) => i % 4 === 3 && v < 128)
+      ? "图片包含透明区域，可选择「整张图片」直接制图。"
+      : "选择整图，或框选主体";
+    await nextTick();
+    drawAll();
+  } catch (e) {
+    error.value = (e as Error).message;
+  } finally {
+    uploading.value = false;
+  }
+  (e.target as HTMLInputElement).value = "";
+}
+function whole() {
+  maskPast.value = [];
+  generation.cancel();
+  revision.value++;
+  clearTimeout(timer);
+  selectionMode.value = "whole";
+  const d = rgba(),
+    im = image.value!;
+  mask.value = Uint8Array.from({ length: im.width * im.height }, (_, i) =>
+    d[i * 4 + 3] >= 128 ? 1 : 0,
+  );
+  maskUrl.value = encodeMask(mask.value, im.width, im.height);
+  selectionDirty.value = false;
+  candidates.value = [];
+  mode.value = "整图制图 · 未调用分割";
+  drawAll();
+  status.value = "已选择整图";
+}
+function objectMode() {
+  generation.cancel();
+  selectionMode.value = "object";
+  selectionDirty.value = true;
+  revision.value++;
+  candidates.value = [];
+  if (box.value) schedule();
+  status.value = "框选主体，松手提取";
+}
+function drawAll() {
+  drawSource();
+  const c = subjectCanvas.value,
+    im = image.value,
+    m = mask.value;
+  if (c) {
+    c.width = im?.width ?? 300;
+    c.height = im?.height ?? 200;
+    if (im && m) {
+      const x = c.getContext("2d")!;
+      x.drawImage(im, 0, 0);
+      const d = x.getImageData(0, 0, c.width, c.height);
+      for (let i = 0; i < m.length; i++) if (!m[i]) d.data[i * 4 + 3] = 0;
+      x.putImageData(d, 0, 0);
+    }
+  }
+}
+function drawSource() {
+  const c = sourceCanvas.value,
+    im = image.value;
+  if (!c || !im) return;
+  c.width = im.width;
+  c.height = im.height;
+  const x = c.getContext("2d")!;
+  x.drawImage(im, 0, 0);
+  if (showSelection.value && mask.value && !selectionDirty.value) {
+    const d = x.getImageData(0, 0, im.width, im.height);
+    for (let i = 0; i < mask.value.length; i++)
+      if (mask.value[i]) {
+        d.data[i * 4] = Math.round(d.data[i * 4] * 0.62 + 43 * 0.38);
+        d.data[i * 4 + 1] = Math.round(d.data[i * 4 + 1] * 0.62 + 175 * 0.38);
+        d.data[i * 4 + 2] = Math.round(d.data[i * 4 + 2] * 0.62 + 128 * 0.38);
+      }
+    x.putImageData(d, 0, 0);
+  }
+  const scale = im.width / (c.getBoundingClientRect().width || im.width);
+  if (box.value && selectionMode.value === "object") {
+    x.strokeStyle = "#f3a443";
+    x.lineWidth = 2 * scale;
+    x.strokeRect(
+      box.value[0],
+      box.value[1],
+      box.value[2] - box.value[0],
+      box.value[3] - box.value[1],
+    );
+  }
+  if (roi.value) {
+    x.strokeStyle = "#9844b5";
+    x.lineWidth = 2 * scale;
+    x.strokeRect(
+      roi.value[0] * im.width,
+      roi.value[1] * im.height,
+      (roi.value[2] - roi.value[0]) * im.width,
+      (roi.value[3] - roi.value[1]) * im.height,
+    );
+  }
+  for (const p of points.value) {
+    x.fillStyle = p.label ? "#19b885" : "#ee6058";
+    x.beginPath();
+    x.arc(p.x, p.y, 5 * scale, 0, Math.PI * 2);
+    x.fill();
+  }
+}
+function pos(e: PointerEvent) {
+  const im = image.value!;
+  return canvasPoint(
+    e.clientX,
+    e.clientY,
+    sourceCanvas.value!.getBoundingClientRect(),
+    im.width,
+    im.height,
+  );
+}
+function changed() {
+  generation.cancel();
+  revision.value++;
+  selectionDirty.value = true;
+  candidates.value = [];
+  merge.value = undefined;
+  drawSource();
+  schedule();
+}
+let maskFrame = 0;
+function requestMaskDraw() {
+  if (!maskFrame)
+    maskFrame = requestAnimationFrame(() => {
+      maskFrame = 0;
+      drawAll();
+    });
+}
+function maskPaint(e: PointerEvent) {
+  const c = sourceCanvas.value!,
+    rect = c.getBoundingClientRect();
+  if (
+    e.clientX < rect.left ||
+    e.clientY < rect.top ||
+    e.clientX >= rect.right ||
+    e.clientY >= rect.bottom
+  ) {
+    maskLast = undefined;
+    return;
+  }
+  const im = image.value!,
+    p = pos(e),
+    m = mask.value!,
+    r = maskRadius.value,
+    last = maskLast ?? p,
+    steps = Math.max(
+      1,
+      Math.ceil(Math.hypot(p.x - last.x, p.y - last.y) / Math.max(1, r / 2)),
+    );
+  for (let j = 0; j <= steps; j++) {
+    const px = last.x + ((p.x - last.x) * j) / steps,
+      py = last.y + ((p.y - last.y) * j) / steps;
+    for (
+      let y = Math.max(0, Math.floor(py - r));
+      y < Math.min(im.height, py + r + 1);
+      y++
+    )
+      for (
+        let x = Math.max(0, Math.floor(px - r));
+        x < Math.min(im.width, px + r + 1);
+        x++
+      )
+        if ((x - px) ** 2 + (y - py) ** 2 <= r * r)
+          m[y * im.width + x] = tool.value === "mask-add" ? 1 : 0;
+  }
+  maskLast = p;
+  requestMaskDraw();
+}
+function maskUndo() {
+  if (!maskPast.value.length || !image.value) return;
+  if (
+    maskPast.value.at(-1)!.length !==
+    image.value.width * image.value.height
+  ) {
+    maskPast.value = [];
+    return;
+  }
+  generation.cancel();
+  revision.value++;
+  mask.value = maskPast.value.pop();
+  maskUrl.value = encodeMask(
+    mask.value!,
+    image.value.width,
+    image.value.height,
+  );
+  candidates.value = [];
+  drawAll();
+}
+function down(e: PointerEvent) {
+  if (e.button !== 0 || !e.isPrimary || transitioning.value || maskStroke)
+    return;
+  if (tool.value.startsWith("mask-") && mask.value) {
+    maskPast.value.push(mask.value.slice());
+    if (maskPast.value.length > 10) maskPast.value.shift();
+    maskStroke = true;
+    maskPointer = e.pointerId;
+    maskLast = undefined;
+    selectionDirty.value = false;
+    generation.cancel();
+    revision.value++;
+    candidates.value = [];
+    clearTimeout(timer);
+    sourceCanvas.value!.setPointerCapture(e.pointerId);
+    maskPaint(e);
+    return;
+  }
+  if (!image.value || uploading.value || selectionMode.value !== "object")
+    return;
+  const p = pos(e);
+  if (tool.value === "box") {
+    start = p;
+    revision.value++;
+    selectionDirty.value = true;
+    sourceCanvas.value!.setPointerCapture(e.pointerId);
+  } else if (box.value) {
+    points.value.push({ ...p, label: tool.value === "keep" ? 1 : 0 });
+    changed();
+  }
+}
+function move(e: PointerEvent) {
+  if (!e.isPrimary) return;
+  if (!maskStroke && !start && tool.value.startsWith("mask-") && image.value) {
+    drawSource();
+    const c = sourceCanvas.value!,
+      p = pos(e),
+      x = c.getContext("2d")!;
+    x.strokeStyle = "#d96b00";
+    x.lineWidth = (2 * image.value.width) / c.getBoundingClientRect().width;
+    x.beginPath();
+    x.arc(p.x, p.y, maskRadius.value, 0, Math.PI * 2);
+    x.stroke();
+  }
+  if (maskStroke && e.pointerId !== maskPointer) return;
+  if (maskStroke) {
+    maskPaint(e);
+    return;
+  }
+  if (!start) return;
+  const p = pos(e);
+  box.value = [
+    Math.min(start.x, p.x),
+    Math.min(start.y, p.y),
+    Math.max(start.x, p.x),
+    Math.max(start.y, p.y),
+  ];
+  drawSource();
+}
+function up(e?: PointerEvent) {
+  if (e && !e.isPrimary) return;
+  if (maskStroke && e && e.pointerId !== maskPointer) return;
+  if (maskStroke) {
+    maskPointer = undefined;
+    maskStroke = false;
+    if (maskFrame) {
+      cancelAnimationFrame(maskFrame);
+      maskFrame = 0;
+      drawAll();
+    }
+    maskLast = undefined;
+    selectionDirty.value = false;
+    maskUrl.value = encodeMask(
+      mask.value!,
+      image.value!.width,
+      image.value!.height,
+    );
+    dirty.value = true;
+    return;
+  }
+  if (!start) return;
+  start = null;
+  points.value = [];
+  if (
+    box.value &&
+    (box.value[2] - box.value[0] < 3 || box.value[3] - box.value[1] < 3)
+  )
+    box.value = undefined;
+  changed();
+}
+function removePoint() {
+  points.value.pop();
+  changed();
+}
+function schedule() {
+  clearTimeout(timer);
+  timer = setTimeout(segment, 300);
+}
+async function segment() {
+  if (
+    processing.value ||
+    !box.value ||
+    selectionMode.value !== "object" ||
+    !image.value ||
+    !sourceUrl.value ||
+    start
+  )
+    return;
+  const rev = revision.value,
+    src = sourceUrl.value,
+    im = image.value;
+  const selectedBox = box.value.map(Math.round),
+    selectedPoints = points.value.map((p) => ({
+      ...p,
+      x: Math.round(p.x),
+      y: Math.round(p.y),
+    }));
+  const current = () =>
+    rev === revision.value &&
+    src === sourceUrl.value &&
+    im === image.value &&
+    selectionMode.value === "object";
+  processing.value = true;
+  error.value = "";
+  try {
+    const register = async () => {
+      if (!current()) return undefined;
+      const blob = await (await fetch(src)).blob();
+      if (!current()) return undefined;
+      const f = new FormData();
+      f.append("file", blob, "restored.png");
+      const uploaded = await api("/images", { method: "POST", body: f });
+      if (!current()) return undefined;
+      imageId.value = uploaded.imageId;
+      return uploaded.imageId as string;
+    };
+    let id = imageId.value;
+    if (!id) {
+      const registered = await register();
+      if (!registered) return;
+      id = registered;
+    }
+    if (!current()) return;
+    const request = (requestId: string) =>
+      api("/segment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          imageId: requestId,
+          box: selectedBox,
+          points: selectedPoints,
+          revision: rev,
+        }),
+      });
+    let v;
+    try {
+      v = await request(id);
+    } catch (e) {
+      if (!current()) return;
+      if (![404, 410].includes((e as Error & { status?: number }).status ?? 0))
+        throw e;
+      imageId.value = "";
+      const registered = await register();
+      if (!registered) return;
+      id = registered;
+      // One recovery retry only; a second expiry/error reaches the outer handler.
+      v = await request(id);
+    }
+    if (
+      !current() ||
+      !isCurrent(v.imageId, v.revision, imageId.value, revision.value)
+    )
+      return;
+    const m = await decodeMask(v.mask, im);
+    if (
+      !current() ||
+      !isCurrent(v.imageId, v.revision, imageId.value, revision.value)
+    )
+      return;
+    maskPast.value = [];
+    mask.value = m;
+    maskUrl.value = v.mask;
+    selectionDirty.value = false;
+    mode.value = v.mode;
+    timings.value = v.timings;
+    status.value = "主体已提取，可补选或去除";
+    drawAll();
+  } catch (e) {
+    if (current()) {
+      error.value = (e as Error).message;
+      status.value = "提取失败，可重试或改用整张图片。";
+      if (
+        [404, 409, 410].includes((e as Error & { status?: number }).status ?? 0)
+      )
+        imageId.value = "";
+    }
+  } finally {
+    processing.value = false;
+    if (
+      rev !== revision.value &&
+      selectionMode.value === "object" &&
+      selectionDirty.value
+    )
+      schedule();
+  }
+}
+async function makeCandidates() {
+  if (!mask.value || selectionDirty.value) return;
+  const rev = revision.value;
+  try {
+    const t = performance.now(),
+      im = image.value!;
+    const out = await generation.run(rgba(), mask.value, im.width, im.height);
+    if (rev !== revision.value) return;
+    candidates.value = out;
+    timings.value = { ...timings.value, candidatesMs: performance.now() - t };
+    step.value = 2;
+    await nextTick();
+    drawCandidates();
+    error.value = "";
+  } catch (e) {
+    if (rev === revision.value && !isGenerationCancelled(e))
+      error.value = (e as Error).message;
+  }
+}
+function drawCandidates() {
+  document
+    .querySelectorAll<HTMLCanvasElement>(".candidate canvas.pattern-preview")
+    .forEach((c, i) => paint(c, candidates.value[i].pattern, 6));
+  document
+    .querySelectorAll<HTMLCanvasElement>(".candidate canvas.original-preview")
+    .forEach((c, i) => drawOriginal(c, candidates.value[i].pattern));
+}
+function drawOriginal(c: HTMLCanvasElement, p: Pattern) {
+  const im = image.value,
+    m = mask.value;
+  if (!im || !m) return;
+  const d = rgba();
+  let x0 = im.width,
+    y0 = im.height,
+    x1 = -1,
+    y1 = -1;
+  for (let y = 0; y < im.height; y++)
+    for (let x = 0; x < im.width; x++)
+      if (m[y * im.width + x] && d[(y * im.width + x) * 4 + 3]) {
+        x0 = Math.min(x0, x);
+        y0 = Math.min(y0, y);
+        x1 = Math.max(x1, x);
+        y1 = Math.max(y1, y);
+      }
+  if (x1 < 0) return;
+  const pad = Math.max(
+    1,
+    Math.round(Math.max(x1 - x0 + 1, y1 - y0 + 1) * 0.025),
+  );
+  x0 = Math.max(0, x0 - pad);
+  y0 = Math.max(0, y0 - pad);
+  x1 = Math.min(im.width, x1 + pad + 1);
+  y1 = Math.min(im.height, y1 + pad + 1);
+  const tmp = document.createElement("canvas");
+  tmp.width = im.width;
+  tmp.height = im.height;
+  const tx = tmp.getContext("2d")!,
+    data = tx.createImageData(im.width, im.height);
+  data.data.set(d);
+  for (let i = 0; i < m.length; i++) if (!m[i]) data.data[i * 4 + 3] = 0;
+  tx.putImageData(data, 0, 0);
+  c.width = p.width * 6;
+  c.height = p.height * 6;
+  const ctx = c.getContext("2d")!;
+  ctx.fillStyle = "#edf0ea";
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(tmp, x0, y0, x1 - x0, y1 - y0, 0, 0, c.width, c.height);
+}
+async function customCandidate() {
+  if (!image.value || !mask.value || selectionDirty.value) return;
+  const rev = revision.value;
+  try {
+    const im = image.value,
+      t = performance.now();
+    const pixels = rgba();
+    const result = await generation.run(
+      pixels,
+      mask.value,
+      im.width,
+      im.height,
+      true,
+      advancedWidth.value,
+      advancedColors.value,
+    );
+    if (rev !== revision.value) return;
+    candidates.value = result;
+    timings.value = { ...timings.value, customMs: performance.now() - t };
+    await nextTick();
+    drawCandidates();
+  } catch (e) {
+    if (rev === revision.value && !isGenerationCancelled(e))
+      error.value = (e as Error).message;
+  }
+}
+function applyConstraints(withROI: boolean) {
+  try {
+    const c = validateConstraints(
+      {
+        required: requiredDraft.value,
+        roi: withROI ? roiDraft.value : roi.value,
+        weight: 3,
+      },
+      advancedColors.value,
+    );
+    required.value = c.required;
+    roi.value = c.roi;
+    constraintError.value = "";
+  } catch (e) {
+    constraintError.value = (e as Error).message;
+  }
+}
+async function detailCandidate() {
+  if (!image.value || !mask.value) return;
+  const rev = revision.value;
+  try {
+    const im = image.value;
+    const out = await generation.run(
+      rgba(),
+      mask.value,
+      im.width,
+      im.height,
+      true,
+      advancedWidth.value,
+      advancedColors.value,
+      { required: required.value, roi: roi.value, weight: 3 },
+    );
+    if (rev !== revision.value) return;
+    candidates.value = out;
+    await nextTick();
+    drawCandidates();
+  } catch (e) {
+    if (rev === revision.value && !isGenerationCancelled(e))
+      error.value = (e as Error).message;
+  }
+}
+async function choose(p: Pattern) {
+  gridSelection.value = null;
+  if (!(await allowReplace())) return;
+  pattern.value = clone(p);
+  locked.value = [];
+  dirty.value = false;
+  past.value = [];
+  future.value = [];
+  merge.value = undefined;
+  chosen.value = p.palette[0]?.code ?? null;
+  step.value = 3;
+  await nextTick();
+}
+function snapshot() {
+  return JSON.stringify({ pattern: pattern.value, locked: locked.value });
+}
+function checkpoint() {
+  past.value.push(snapshot());
+  if (past.value.length > 20) past.value.shift();
+  future.value = [];
+  merge.value = undefined;
+  dirty.value = true;
+}
+function undo(redo = false) {
+  const from = redo ? future : past,
+    to = redo ? past : future;
+  const v = from.value.pop();
+  if (!v) return;
+  to.value.push(snapshot());
+  const s = JSON.parse(v);
+  pattern.value = s.pattern;
+  locked.value = s.locked;
+  chosen.value = s.pattern.palette[0]?.code ?? null;
+  merge.value = undefined;
+  dirty.value = true;
+}
+function applyStroke(cells: (string | null)[]) {
+  checkpoint();
+  pattern.value = { ...pattern.value!, cells };
+}
+function lock(code: string) {
+  checkpoint();
+  locked.value = locked.value.includes(code)
+    ? locked.value.filter((c) => c !== code)
+    : [...locked.value, code];
+}
+async function suggest() {
+  if (!pattern.value) return;
+  merge.value = planMerge(pattern.value, locked.value);
+  await nextTick();
+  const c = document.querySelector<HTMLCanvasElement>("#merge-preview");
+  if (c) paint(c, merge.value.pattern, 5);
+}
+function applyColorReplace(p: Pattern) {
+  checkpoint();
+  pattern.value = clone(p);
+  chosen.value = p.palette[0]?.code ?? null;
+  status.value = "已替换，可撤销";
+}
+function applyMerge() {
+  if (!merge.value?.affected) return;
+  const p = clone(merge.value.pattern);
+  checkpoint();
+  pattern.value = p;
+  chosen.value = p.palette[0]?.code ?? null;
+}
+function download(blob: Blob, name: string) {
+  const u = URL.createObjectURL(blob),
+    a = document.createElement("a");
+  a.href = u;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(u), 1000);
+}
+function exportCSV() {
+  if (pattern.value)
+    download(
+      new Blob([materialsCSV(clone(pattern.value), extra.value)], {
+        type: "text/csv;charset=utf-8",
+      }),
+      "materials.csv",
+    );
+}
+function exportPNG() {
+  if (!pattern.value) return;
+  const c = document.createElement("canvas");
+  paint(c, clone(pattern.value), 30, true, projectName.value);
+  c.toBlob((b) => b && download(b, "bead-pattern-v2.png"));
+}
+function exportProject() {
+  download(
+    new Blob([JSON.stringify({ ...project(), statistics: count.value })], {
+      type: "application/json",
+    }),
+    "bead-project-v2.json",
+  );
+}
+async function openProject(e: Event) {
+  const input = e.target as HTMLInputElement,
+    f = input.files?.[0];
+  if (!f || transitioning.value) return;
+  transitioning.value = true;
+  try {
+    if (f.size > 50_000_000) throw Error("项目文件过大");
+    const p = parseProject(await f.text());
+    const im = p.source ? await loadImage(p.source) : undefined;
+    if (p.mask && im) await decodeMask(p.mask, im);
+    if (
+      im &&
+      (p.points.some((q) => q.x >= im.width || q.y >= im.height) ||
+        (p.box && (p.box[2] > im.width || p.box[3] > im.height)))
+    )
+      throw Error("提示坐标超出图片范围");
+    settleTasks();
+    await flushProject();
+    const now = Date.now(),
+      row = {
+        id: crypto.randomUUID(),
+        name: f.name.replace(/\.json$/i, "").slice(0, 80) || "导入项目",
+        createdAt: now,
+        updatedAt: now,
+        project: p,
+      };
+    await saveProject(row);
+    await restore(p, row);
+    error.value = "";
+  } catch (e) {
+    error.value = (e as Error).message;
+  } finally {
+    input.value = "";
+    transitioning.value = false;
+  }
+}
+function settleTasks() {
+  up();
+  generation.cancel();
+  revision.value++;
+  clearTimeout(timer);
+}
+async function flushProject() {
+  clearTimeout(saveTimer);
+  saveVersion++;
+  if (sourceUrl.value || pattern.value) {
+    saveStatus.value = "等待保存…";
+    await queueSave();
+  } else await saveSerial;
+}
+async function openDirectory() {
+  try {
+    await flushProject();
+    showProjects.value = true;
+  } catch {
+    error.value = "保存失败，请先下载项目备份";
+  }
+}
+async function prepareProjectAction(id: string, name?: string) {
+  if (id === projectId.value && name !== undefined) projectName.value = name;
+  await flushProject();
+}
+async function switchProject(row: SavedProject) {
+  if (transitioning.value) return;
+  transitioning.value = true;
+  try {
+    settleTasks();
+    await flushProject();
+    if (row.id !== projectId.value) {
+      const latest = await loadProject(row.id);
+      await restore(latest.project, latest);
+    }
+    showProjects.value = false;
+    autosave();
+  } catch (e) {
+    error.value = (e as Error).message;
+  } finally {
+    transitioning.value = false;
+  }
+}
+async function newProject() {
+  if (transitioning.value) return;
+  transitioning.value = true;
+  try {
+    maskStroke = false;
+    start = null;
+    tool.value = "box";
+    settleTasks();
+    await flushProject();
+    generation.cancel();
+    revision.value++;
+    clearTimeout(timer);
+    sourceUrl.value = undefined;
+    maskUrl.value = undefined;
+    image.value = undefined;
+    mask.value = undefined;
+    maskPast.value = [];
+    pattern.value = undefined;
+    imageId.value = "";
+    box.value = undefined;
+    points.value = [];
+    locked.value = [];
+    candidates.value = [];
+    past.value = [];
+    future.value = [];
+    dirty.value = false;
+    selectionDirty.value = false;
+    step.value = 1;
+    projectId.value = crypto.randomUUID();
+    projectName.value = "未命名";
+    normalization.value = undefined;
+    required.value = [];
+    roi.value = undefined;
+    gridSelection.value = null;
+    error.value = "";
+    status.value = "导入图片";
+    saveStatus.value = "未保存";
+    setActiveProject(projectId.value);
+    createdAt.value = Date.now();
+    showProjects.value = false;
+    clearTimeout(saveTimer);
+    await nextTick();
+    drawAll();
+  } catch (e) {
+    error.value = (e as Error).message;
+  } finally {
+    transitioning.value = false;
+  }
+}
+async function go(n: number) {
+  step.value = n;
+  await nextTick();
+  drawAll();
+}
 </script>
 <template>
-<header :inert="transitioning"><a class="brand" href="/">豆影</a><button @click="showProjects=true">项目</button><span class="runtime">{{saveStatus}}</span><label class="upload">打开项目<input aria-label="打开项目" type="file" accept="application/json,.json" :disabled="uploading||processing" @change="openProject"></label></header>
-<main :inert="transitioning"><ProjectList v-if="showProjects" :current="projectId" @open="switchProject" @create="newProject" @close="showProjects=false" @rename="(id,name)=>{if(id===projectId)projectName=name}"/><div v-if="generating" class="notice">正在生成… <button @click="generation.cancel">取消</button></div><nav class="steps"><button v-for="(s,i) in ['图片与主体','图纸方案','编辑与保存']" :class="{active:step===i+1}" :disabled="(i===1&&(!mask||selectionDirty||processing))||(i===2&&!pattern)" @click="i===1?makeCandidates():go(i+1)">{{i+1}} · {{s}}</button></nav>
-<p v-if="step===3&&pattern&&pattern.algorithm!==COLOR_ALGORITHM" class="palette-note">旧版配色，可在「图纸方案」重新生成。</p>
+  <header :inert="transitioning || showProjects">
+    <a class="brand" href="/">豆影</a
+    ><button @click="openDirectory">项目</button
+    ><button v-if="sourceUrl || pattern" @click="exportProject">下载项目</button
+    ><span class="runtime">{{ saveStatus }}</span
+    ><label class="upload"
+      >打开项目<input
+        aria-label="打开项目"
+        type="file"
+        accept="application/json,.json"
+        :disabled="uploading || processing"
+        @change="openProject"
+    /></label>
+  </header>
+  <main :inert="transitioning">
+    <ProjectList
+      v-if="showProjects"
+      :current="projectId"
+      :before-action="prepareProjectAction"
+      @open="switchProject"
+      @create="newProject"
+      @close="showProjects = false"
+      @rename="
+        (id, name) => {
+          if (id === projectId) projectName = name;
+        }
+      "
+    />
+    <div :inert="showProjects">
+      <div v-if="generating" class="notice">
+        正在生成… <button @click="generation.cancel">取消</button>
+      </div>
+      <nav class="steps">
+        <button
+          v-for="(s, i) in ['图片与主体', '图纸方案', '编辑与保存']"
+          :class="{ active: step === i + 1 }"
+          :disabled="
+            (i === 1 && (!mask || selectionDirty || processing)) ||
+            (i === 2 && !pattern)
+          "
+          @click="i === 1 ? makeCandidates() : go(i + 1)"
+        >
+          {{ i + 1 }} · {{ s }}
+        </button>
+      </nav>
+      <p
+        v-if="step === 3 && pattern && pattern.algorithm !== COLOR_ALGORITHM"
+        class="palette-note"
+      >
+        旧版配色，可在「图纸方案」重新生成。
+      </p>
 
-<div v-if="replacement" class="error" role="dialog" aria-label="替换当前修改"><p>将覆盖当前手工修改，是否继续？</p><button @click="confirmReplace(false)">取消</button><button class="primary" @click="confirmReplace(true)">继续替换</button></div><div class="notice" role="status">{{processing?'正在提取…':status}}</div><div v-if="error" role="alert" class="error">{{error}}</div>
-<section v-show="step===1" class="workspace"><div class="panel"><div class="panel-heading"><h2>图片</h2><label class="upload">＋ 导入图片<input aria-label="导入图片" type="file" accept="image/png,image/jpeg" :disabled="uploading||processing" @change="upload"></label></div><div v-if="image" class="tools"><button :class="{active:selectionMode==='whole'}" @click="whole">整张图片</button><button :class="{active:selectionMode==='object'}" @click="objectMode">提取主体</button></div><div v-if="image&&selectionMode==='object'" class="tools"><button v-for="[v,l] in [['box','框选对象'],['keep','＋ 补选'],['remove','－ 去除']]" :class="{active:tool===v}" @click="tool=v">{{l}}</button><button :disabled="!points.length" @click="removePoint">撤回</button><button :disabled="!box||processing" @click="segment">重新提取</button></div><div v-if="mask" class="tools"><button @click="tool='mask-add'" :class="{active:tool==='mask-add'}">补回画笔</button><button @click="tool='mask-remove'" :class="{active:tool==='mask-remove'}">擦除选区</button><button :disabled="!maskPast.length" @click="maskUndo">撤销修补</button></div><label v-if="image" class="selection-toggle"><input type="checkbox" v-model="showSelection" @change="drawSource"> 显示选区</label><div class="image-stage"><canvas v-show="image" ref="sourceCanvas" @pointerdown="down" @pointermove="move" @pointerup="up" @pointercancel="up"></canvas><p v-if="!image">导入 JPG / PNG</p></div></div><aside class="panel settings"><div class="panel-heading"><h2>主体预览</h2></div><div class="subject-preview checker"><canvas ref="subjectCanvas"></canvas></div><button class="primary generate" :disabled="!mask||selectionDirty||uploading||processing" @click="makeCandidates">生成图纸</button></aside></section>
-<section v-if="step===2" class="panel"><div class="panel-heading"><h2>图纸方案</h2><label>豆板钉距 <select v-model.number="pitch"><option :value="2.6">2.6 mm</option><option :value="5">5 mm</option></select></label></div><p class="palette-note">{{candidates[0]?.pattern.paletteName}}</p><details class="advanced"><summary>自定义</summary><label>宽度 <select v-model.number="advancedWidth"><option v-for="n in [32,48,64]" :value="n">{{n}} 格</option></select></label><label>最多颜色 <select v-model.number="advancedColors"><option v-for="n in [8,12,16,24,32]" :value="n">{{n}} 色</option></select></label><button @click="customCandidate">生成对比</button><p>平滑保留过渡；色块减少混色，可能损失细线。</p></details><div class="candidates"><button v-for="c in candidates" class="candidate" @click="choose(c.pattern)"><h3>{{c.label}}</h3><div class="compare-colors"><div><small>原图</small><canvas class="original-preview"></canvas></div><div><small>图纸</small><canvas class="pattern-preview"></canvas></div></div><p>{{c.pattern.width}} × {{c.pattern.height}} 格</p><b>{{stats(c.pattern.cells).total}} 颗 · {{Object.keys(stats(c.pattern.cells).counts).length}} 色</b><p>约 {{(c.pattern.width*pitch/10).toFixed(1)}} × {{(c.pattern.height*pitch/10).toFixed(1)}} cm</p><span>使用此方案</span></button></div></section>
-<section v-if="step===3&&pattern" class="panel result"><div class="panel-heading"><h2>编辑图纸</h2><div class="export"><button :disabled="!past.length" @click="undo()">撤销</button><button :disabled="!future.length" @click="undo(true)">重做</button><button @click="exportProject">保存项目</button><button @click="exportCSV">材料 CSV</button><button @click="printing=true">打印</button><button class="primary" @click="exportPNG">下载图纸 PNG</button></div></div><div class="result-meta"><b>{{pattern.width}} × {{pattern.height}} 格</b><span>{{count.total}} 颗豆 · {{Object.keys(count.counts).length}} 色</span><span>{{hover}}</span><span>{{pattern.paletteName}}</span><span>取色：{{pattern.sampling==='dominant'?'保留色块':'平滑过渡'}}</span></div><details class="advanced"><summary>导出设置</summary><label>分块 <select v-model.number="blockSize"><option :value="16">16 格</option><option :value="29">29 格</option><option :value="32">32 格</option></select></label><label>备料余量 <input type="number" v-model.number="extra" min="0" max="100"> %</label></details><ColorReplace :pattern="pattern" :locked="locked" @apply="applyColorReplace"/><div class="result-body"><GridEditor :pattern="pattern" :chosen="chosen" @pick="chosen=$event" @stroke="applyStroke"/><div class="colors"><h3>颜色与用量</h3><button @click="chosen=null">橡皮擦</button><div v-for="c in pattern.palette" class="color-row"><button :class="{selected:chosen===c.code}" @click="chosen=c.code"><i :style="{background:c.hex}"></i>{{c.code}}<span>{{count.counts[c.code]??0}} 颗</span></button><button :aria-label="'锁定 '+c.code" :class="{active:locked.includes(c.code)}" @click="lock(c.code)">{{locked.includes(c.code)?'已锁':'锁色'}}</button></div></div></div><details class="merge-panel"><summary>合并少量颜色 · {{rare.length}} 色</summary><p>锁色可保留细节，避免被合并或替换。</p><button @click="suggest">预览合并</button><div v-if="merge"><p>减少 {{Object.keys(merge.mapping).length}} 种颜色，影响 {{merge.affected}} 格；总豆数保持不变。</p><p v-for="(target,code) in merge.mapping">{{code}}（{{count.counts[code]}}颗）→ {{target}}</p><canvas id="merge-preview"></canvas><p v-if="!merge.affected">没有可合并的颜色。</p><button class="primary" :disabled="!merge.affected" @click="applyMerge">应用合并</button><button @click="merge=undefined">取消</button></div></details></section>
-<details class="details"><summary>项目信息</summary><p>{{mode||health.mode}} · {{health.device}} · {{health.detail}}</p><p>{{timings}}</p><p v-if="pattern?.paletteInfo">{{pattern.paletteInfo.note}} 来源：{{pattern.paletteInfo.source}} · {{pattern.paletteInfo.license}}</p><p>草稿保存在当前浏览器地址；下载项目可备份。屏幕颜色与估算尺寸请核对实物。</p></details><Teleport to="body"><PrintView v-if="printing&&pattern" :pattern="pattern" :size="blockSize" @close="printing=false"/></Teleport></main>
+      <div
+        v-if="replacement"
+        class="error"
+        role="dialog"
+        aria-label="替换当前修改"
+      >
+        <p>将覆盖当前手工修改，是否继续？</p>
+        <button @click="confirmReplace(false)">取消</button
+        ><button class="primary" @click="confirmReplace(true)">继续替换</button>
+      </div>
+      <div class="notice" role="status">
+        {{ processing ? "正在提取…" : status }}
+      </div>
+      <div v-if="error" role="alert" class="error">{{ error }}</div>
+      <section v-show="step === 1" class="workspace">
+        <div class="panel">
+          <div class="panel-heading">
+            <h2>图片</h2>
+            <label class="upload"
+              >＋ 导入图片<input
+                aria-label="导入图片"
+                type="file"
+                accept="image/png,image/jpeg"
+                :disabled="uploading || processing"
+                @change="upload"
+            /></label>
+          </div>
+          <div v-if="image" class="tools">
+            <button
+              :class="{ active: selectionMode === 'whole' }"
+              @click="whole"
+            >
+              整张图片</button
+            ><button
+              :class="{ active: selectionMode === 'object' }"
+              @click="objectMode"
+            >
+              提取主体
+            </button>
+          </div>
+          <div v-if="image && selectionMode === 'object'" class="tools">
+            <button
+              v-for="[v, l] in [
+                ['box', '框选对象'],
+                ['keep', '＋ 补选'],
+                ['remove', '－ 去除'],
+              ]"
+              :class="{ active: tool === v }"
+              @click="tool = v"
+            >
+              {{ l }}</button
+            ><button :disabled="!points.length" @click="removePoint">
+              撤回</button
+            ><button :disabled="!box || processing" @click="segment">
+              重新提取
+            </button>
+          </div>
+          <div v-if="mask" class="tools">
+            <button
+              @click="tool = 'mask-add'"
+              :class="{ active: tool === 'mask-add' }"
+            >
+              补回画笔</button
+            ><button
+              @click="tool = 'mask-remove'"
+              :class="{ active: tool === 'mask-remove' }"
+            >
+              擦除选区</button
+            ><label
+              >笔刷
+              <input
+                aria-label="掩码笔刷半径"
+                type="range"
+                min="2"
+                max="36"
+                v-model.number="maskRadius" /></label
+            ><button :disabled="!maskPast.length" @click="maskUndo">
+              撤销修补
+            </button>
+          </div>
+          <label v-if="image" class="selection-toggle"
+            ><input
+              type="checkbox"
+              v-model="showSelection"
+              @change="drawSource"
+            />
+            显示选区</label
+          >
+          <div class="image-stage">
+            <canvas
+              v-show="image"
+              ref="sourceCanvas"
+              @pointerdown="down"
+              @pointermove="move"
+              @pointerup="up"
+              @pointercancel="up"
+              @lostpointercapture="up"
+            ></canvas>
+            <p v-if="!image">导入 JPG / PNG</p>
+          </div>
+        </div>
+        <aside class="panel settings">
+          <div class="panel-heading"><h2>主体预览</h2></div>
+          <div class="subject-preview checker">
+            <canvas ref="subjectCanvas"></canvas>
+          </div>
+          <button
+            class="primary generate"
+            :disabled="!mask || selectionDirty || uploading || processing"
+            @click="makeCandidates"
+          >
+            生成图纸
+          </button>
+        </aside>
+      </section>
+      <section v-if="step === 2" class="panel">
+        <div class="panel-heading">
+          <h2>图纸方案</h2>
+          <label
+            >豆板钉距
+            <select v-model.number="pitch">
+              <option :value="2.6">2.6 mm</option>
+              <option :value="5">5 mm</option>
+            </select></label
+          >
+        </div>
+        <p class="palette-note">{{ candidates[0]?.pattern.paletteName }}</p>
+        <details class="advanced">
+          <summary>自定义</summary>
+          <label
+            >宽度
+            <select v-model.number="advancedWidth">
+              <option v-for="n in GRID_WIDTHS" :value="n">{{ n }} 格</option>
+            </select></label
+          ><label
+            >最多颜色
+            <select v-model.number="advancedColors">
+              <option v-for="n in COLOR_LIMITS" :value="n">{{ n }} 色</option>
+            </select></label
+          ><button @click="customCandidate">生成对比</button>
+          <details>
+            <summary>细节保护（实验）</summary>
+            <label
+              >候选必选色（最多4色）<select
+                aria-label="候选必选色"
+                multiple
+                v-model="requiredDraft"
+              >
+                <option v-for="c in DEFAULT_PALETTE" :value="c.code">
+                  {{ c.code }}
+                </option>
+              </select></label
+            ><label v-for="(label, i) in ['左', '上', '右', '下']"
+              >{{ label
+              }}<input
+                type="number"
+                min="0"
+                max="1"
+                step=".05"
+                v-model.number="roiDraft[i]" /></label
+            ><button @click="applyConstraints(true)">设细节区域</button
+            ><button
+              @click="
+                roi = undefined;
+                required = [];
+                requiredDraft = [];
+                constraintError = '';
+              "
+            >
+              清除</button
+            ><span>{{ roi ? "已设区域" : "" }}</span
+            ><span role="status">{{ constraintError }}</span
+            ><button @click="applyConstraints(false)">应用色号</button
+            ><button @click="detailCandidate">生成细节方案</button>
+          </details>
+          <p>平滑保留过渡；色块减少混色，可能损失细线。</p>
+        </details>
+        <div class="candidates">
+          <button
+            v-for="c in candidates"
+            class="candidate"
+            @click="choose(c.pattern)"
+          >
+            <h3>{{ c.label }}</h3>
+            <div class="compare-colors">
+              <div>
+                <small>原图</small><canvas class="original-preview"></canvas>
+              </div>
+              <div>
+                <small>图纸</small><canvas class="pattern-preview"></canvas>
+              </div>
+            </div>
+            <p>{{ c.pattern.width }} × {{ c.pattern.height }} 格</p>
+            <b
+              >{{ stats(c.pattern.cells).total }} 颗 ·
+              {{ Object.keys(stats(c.pattern.cells).counts).length }} 色</b
+            >
+            <p>
+              约 {{ ((c.pattern.width * pitch) / 10).toFixed(1) }} ×
+              {{ ((c.pattern.height * pitch) / 10).toFixed(1) }} cm
+            </p>
+            <span>使用此方案</span>
+          </button>
+        </div>
+      </section>
+      <section v-if="step === 3 && pattern" class="panel result">
+        <div class="panel-heading">
+          <h2>编辑图纸</h2>
+          <div class="export">
+            <button :disabled="!past.length" @click="undo()">撤销</button
+            ><button :disabled="!future.length" @click="undo(true)">重做</button
+            ><button @click="exportProject">下载项目</button
+            ><button @click="exportCSV">材料 CSV</button
+            ><button @click="openPrint">打印</button
+            ><button class="primary" @click="exportPNG">下载图纸 PNG</button>
+          </div>
+        </div>
+        <div class="result-meta">
+          <b>{{ pattern.width }} × {{ pattern.height }} 格</b
+          ><span
+            >{{ count.total }} 颗豆 ·
+            {{ Object.keys(count.counts).length }} 色</span
+          ><span>{{ pattern.paletteName }}</span
+          ><span
+            >取色：{{
+              pattern.sampling === "dominant" ? "保留色块" : "平滑过渡"
+            }}</span
+          >
+        </div>
+        <details class="advanced">
+          <summary>导出设置</summary>
+          <label
+            >分块
+            <select v-model.number="blockSize">
+              <option :value="16">16 格</option>
+              <option :value="29">29 格</option>
+              <option :value="32">32 格</option>
+            </select></label
+          ><label
+            >备料余量
+            <input type="number" v-model.number="extra" min="0" max="100" />
+            %</label
+          >
+        </details>
+        <ColorReplace
+          :pattern="pattern"
+          :locked="locked"
+          :selection="gridSelection"
+          @apply="applyColorReplace"
+        />
+        <div class="result-body">
+          <GridEditor
+            :key="projectId"
+            :pattern="pattern"
+            @selection="gridSelection = $event"
+            :chosen="chosen"
+            @pick="chosen = $event"
+            @stroke="applyStroke"
+          />
+          <div class="colors">
+            <h3>颜色与用量</h3>
+            <button @click="chosen = null">橡皮擦</button>
+            <div v-for="c in pattern.palette" class="color-row">
+              <button
+                :class="{ selected: chosen === c.code }"
+                @click="chosen = c.code"
+              >
+                <i :style="{ background: c.hex }"></i>{{ c.code
+                }}<span>{{ count.counts[c.code] ?? 0 }} 颗</span></button
+              ><button
+                :aria-label="'锁定 ' + c.code"
+                :class="{ active: locked.includes(c.code) }"
+                @click="lock(c.code)"
+              >
+                {{ locked.includes(c.code) ? "已锁" : "锁色" }}
+              </button>
+            </div>
+          </div>
+        </div>
+        <details class="merge-panel">
+          <summary>合并少量颜色 · {{ rare.length }} 色</summary>
+          <p>锁色可保留细节，避免被合并或替换。</p>
+          <button @click="suggest">预览合并</button>
+          <div v-if="merge">
+            <p>
+              减少 {{ Object.keys(merge.mapping).length }} 种颜色，影响
+              {{ merge.affected }} 格；总豆数保持不变。
+            </p>
+            <p v-for="(target, code) in merge.mapping">
+              {{ code }}（{{ count.counts[code] }}颗）→ {{ target }}
+            </p>
+            <canvas id="merge-preview"></canvas>
+            <p v-if="!merge.affected">没有可合并的颜色。</p>
+            <button
+              class="primary"
+              :disabled="!merge.affected"
+              @click="applyMerge"
+            >
+              应用合并</button
+            ><button @click="merge = undefined">取消</button>
+          </div>
+        </details>
+      </section>
+      <details class="details">
+        <summary>项目信息</summary>
+        <p>
+          {{ mode || health.mode }} · {{ health.device }} · {{ health.detail }}
+        </p>
+        <p>{{ timings }}</p>
+        <p v-if="pattern?.paletteInfo">
+          {{ pattern.paletteInfo.note }} 来源：{{
+            pattern.paletteInfo.source
+          }}
+          · {{ pattern.paletteInfo.license }}
+        </p>
+        <p>
+          草稿保存在当前浏览器地址；下载项目可备份。屏幕颜色与估算尺寸请核对实物。
+        </p>
+      </details>
+      <Teleport to="body"
+        ><PrintView
+          v-if="printing && exportSnapshot"
+          :pattern="exportSnapshot"
+          :name="exportName"
+          :size="blockSize"
+          @close="printing = false"
+      /></Teleport>
+    </div>
+  </main>
 </template>
-
