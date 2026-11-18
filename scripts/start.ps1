@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()]
 param(
     [string]$PythonPath,
-    [ValidateRange(1024,65535)][int]$Port = 8766,
+    [ValidateRange(1024,65535)][int]$Port = 8765,
     [switch]$Build,
     [switch]$Cpu,
     [switch]$CheckOnly
@@ -20,21 +20,39 @@ $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
 $npmCommand = Get-Command npm.cmd -ErrorAction SilentlyContinue
 if ($nodeCommand) { & $nodeCommand.Source --version }
 else { Write-Warning 'Node is unavailable. An existing frontend build can still be served.' }
-if ($Build -and -not $CheckOnly) {
-    if (-not $npmCommand) { throw 'npm not found. Install Node.js to build the frontend.' }
+$manifestPath = Join-Path $frontendRoot 'dist\build-info.json'
+$buildNeeded = $true
+try {
+    $buildInfo = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($buildInfo.appId -ne 'beads-shadows' -or -not $buildInfo.buildId) { throw 'Invalid build manifest' }
+    $builtAtUtc = [DateTimeOffset]::Parse($buildInfo.builtAt).UtcDateTime
+    $inputs = @()
+    foreach ($folder in @('src', 'public')) {
+        $inputRoot = Join-Path $frontendRoot $folder
+        if (Test-Path -LiteralPath $inputRoot) { $inputs += @(Get-ChildItem -LiteralPath $inputRoot -Recurse -File) }
+    }
+    $inputs += @(Get-ChildItem -LiteralPath $frontendRoot -File | Where-Object { $_.Name -match '^(package(-lock)?\.json|vite\.config\.[cm]?[jt]s|tsconfig.*\.json|index\.html)$' })
+    $newerInputs = @($inputs | Where-Object { $_.LastWriteTimeUtc -gt $builtAtUtc })
+    $buildNeeded = $newerInputs.Count -gt 0 -or -not (Test-Path -LiteralPath (Join-Path $frontendRoot 'dist\index.html'))
+} catch { $buildNeeded = $true }
+if ($Build -or $buildNeeded) {
+    if (-not $nodeCommand -or -not $npmCommand) { throw 'Frontend missing/outdated; Node/npm is required to build the current source. Install Node.js first.' }
     if (-not (Test-Path -LiteralPath (Join-Path $frontendRoot 'node_modules'))) { throw 'Frontend dependencies missing. Run scripts/install.ps1 first.' }
-    Push-Location $frontendRoot
-    try { & $npmCommand.Source run build; if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' } }
-    finally { Pop-Location }
+    if ($CheckOnly) { Write-Host 'Frontend build required. Normal startup will build current source; CheckOnly does not build.' }
+    else {
+        Push-Location $frontendRoot
+        try { & $npmCommand.Source run build; if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' } }
+        finally { Pop-Location }
+        if (-not (Test-Path -LiteralPath $manifestPath)) { throw 'Frontend build manifest missing after build.' }
+    }
 }
-if (-not (Test-Path -LiteralPath (Join-Path $frontendRoot 'dist\index.html'))) { throw 'Frontend build missing. Run scripts/start.ps1 -Build or scripts/install.ps1.' }
 # A temporary bind checks the selected localhost port without touching an existing service.
 $portProbe = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
 $portProbe.ExclusiveAddressUse = $true
 try { $portProbe.Start() }
 catch { throw "Localhost port $Port is occupied. Choose another -Port; no existing process was stopped." }
 finally { $portProbe.Stop() }
-Write-Host "Preflight OK: http://127.0.0.1:$Port"
+Write-Host "Environment/port check OK: http://127.0.0.1:$Port"
 if ($CheckOnly) { Write-Host 'Check only: no server started; no dependencies downloaded.'; return }
 $serverProcess = $null
 $previousDisableSam = [Environment]::GetEnvironmentVariable('BEAD_DISABLE_SAM', 'Process')
@@ -54,10 +72,12 @@ try {
         catch { Start-Sleep -Milliseconds 400 }
     }
     if (-not $serverHealth) { throw 'Server did not become ready within 60 seconds.' }
+    if ($serverHealth.appId -ne 'beads-shadows' -or -not $serverHealth.frontendAvailable -or -not $serverHealth.frontendBuild) { throw 'Server identity or frontend build metadata is invalid.' }
     if ($serverProcess.HasExited) { throw 'Server exited before readiness was confirmed.' }
     Write-Host "Ready: http://127.0.0.1:$Port"
     Write-Host ("Mode: {0}; device: {1}" -f $serverHealth.mode, $serverHealth.device)
     Write-Host $serverHealth.detail
+    Write-Host ("Backend: {0}; frontend: {1}" -f $serverHealth.backendVersion, $serverHealth.frontendBuild.buildId)
     Write-Host "Logs: $sessionLogs"
     Write-Host 'Press Ctrl+C to stop this server.'
     while (-not $serverProcess.HasExited) { Start-Sleep -Milliseconds 500 }

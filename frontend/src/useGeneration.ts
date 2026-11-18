@@ -1,6 +1,7 @@
 import { ref, onBeforeUnmount } from "vue";
 import type { Pattern } from "./engine";
 import { validateConstraints } from "./constraints";
+import { getPalette } from "./palettes/catalog";
 export class GenerationCancelledError extends Error {
   constructor() {
     super("已取消");
@@ -33,6 +34,7 @@ export function useGeneration() {
     n = 64,
     k = 16,
     constraints?: import("./constraints").Constraints,
+    paletteId = "legacy-mard220",
   ) {
     cancel();
     const id = ++serial;
@@ -55,10 +57,12 @@ export function useGeneration() {
           reject(error);
         };
         try {
+          const palette = getPalette(paletteId);
+          if (!palette?.available) throw Error("所选色卡当前不可用");
           // Rebuild plain arrays at the transport boundary: Vue Proxy values
           // are valid inputs but cannot be structured-cloned by postMessage.
           const plainConstraints = constraints
-            ? validateConstraints(constraints, k)
+            ? validateConstraints(constraints, k, palette.colors)
             : undefined;
           current = new Worker(
             new URL("./generation.worker.ts", import.meta.url),
@@ -90,6 +94,7 @@ export function useGeneration() {
               n,
               k,
               constraints: plainConstraints,
+              paletteId,
             },
             [p.buffer, m.buffer],
           );

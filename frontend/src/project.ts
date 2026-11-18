@@ -1,9 +1,11 @@
 import { GRID_WIDTHS, COLOR_LIMITS } from "./config";
 import { validateConstraints, type Constraints } from "./constraints";
 import { stats, type Pattern } from "./engine";
+import { getPalette } from "./palettes/catalog";
 export type Project = {
   schemaVersion: 2;
   normalization?: string;
+  paletteId?: string;
   constraints?: Constraints;
   pattern?: Pattern;
   source?: string;
@@ -24,6 +26,8 @@ export function validateProject(raw: any): Project {
   if (!raw || ![1, 2].includes(raw.schemaVersion))
     throw Error("不支持的项目版本");
   const p = raw.schemaVersion === 1 ? raw : raw.pattern;
+  for (const id of [raw.paletteId, p?.paletteId])
+    if (id !== undefined && (typeof id !== "string" || !getPalette(id)?.available)) fail();
   let pattern: Pattern | undefined;
   if (p) {
     if (
@@ -70,6 +74,7 @@ export function validateProject(raw: any): Project {
     )
       fail();
     pattern = {
+      ...(p.paletteId ? { paletteId: p.paletteId } : {}),
       width: p.width,
       height: p.height,
       cells: p.cells.slice(),
@@ -100,7 +105,7 @@ export function validateProject(raw: any): Project {
       pattern.paletteInfo = info;
     }
     if (p.constraints !== undefined)
-      pattern.constraints = validateConstraints(p.constraints, p.colorLimit);
+      pattern.constraints = validateConstraints(p.constraints, p.colorLimit, getPalette(p.paletteId ?? "legacy-mard220")?.colors);
     if (p.algorithm !== undefined) {
       if (typeof p.algorithm !== "string" || p.algorithm.length > 100) fail();
       pattern.algorithm = p.algorithm;
@@ -168,11 +173,13 @@ export function validateProject(raw: any): Project {
     fail();
   return {
     schemaVersion: 2,
+    ...(raw.paletteId ? { paletteId: raw.paletteId } : {}),
     ...(raw.constraints
       ? {
           constraints: validateConstraints(
             raw.constraints,
             raw.tuning?.colors ?? 32,
+            getPalette(raw.paletteId ?? p?.paletteId ?? "legacy-mard220")?.colors,
           ),
         }
       : {}),

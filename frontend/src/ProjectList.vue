@@ -52,6 +52,7 @@ async function change(row: SavedProject, action: string) {
     const full = await loadProject(row.id);
     if (action === "copy") {
       full.id = crypto.randomUUID();
+      full.revision = 0;
       full.name += " 副本";
       full.createdAt = Date.now();
     } else if (action === "delete") full.deleted = Date.now();

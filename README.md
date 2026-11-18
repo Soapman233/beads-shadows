@@ -7,7 +7,7 @@
 - 导入 JPG / PNG，使用整图或框选主体；支持补选、去除和透明预览。
 - 对比 32 / 48 / 64 格方案，设置最多 8 / 12 / 16 / 24 / 32 色。
 - 平滑取色与主色块取色，原图与图纸并排预览。
-- MARD 社区参考色卡、豆数与用量统计、尺寸估算。
+- Perler、Hama/Midi、Artkal/S、MARD 参考色卡选择、豆数与用量统计、尺寸估算。
 - 单格编辑、锁色、整色替换、合并少量颜色、撤销与重做。
 - 浏览器草稿自动保存；导入/导出项目 JSON，导出带坐标、色号和用量的 PNG。
 
@@ -22,7 +22,7 @@ python -m venv backend/.venv
 backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.txt
 npm.cmd --prefix frontend ci
 npm.cmd --prefix frontend run build
-backend/.venv/Scripts/python.exe -m uvicorn app:app --app-dir backend --host 127.0.0.1 --port 8765
+./scripts/start.ps1
 ```
 
 打开 **http://127.0.0.1:8765/**。首次构建必须在启动服务之前完成。macOS / Linux 将 Python 路径换成 `backend/.venv/bin/python`，将 `npm.cmd` 换成 `npm`。
@@ -72,7 +72,9 @@ docs/        架构与验证说明
 
 ## 开源来源
 
-项目代码采用 [MIT](LICENSE)。色卡数据来自 [maxcleme/beadcolors](https://github.com/maxcleme/beadcolors)，其 MIT 声明及原始 CSV 保存在 `frontend/src/palettes/`。当前使用经典 A–H、M 体系的 220 色子集，不等同于上游全部 MARD 数据；H1 暂未纳入，源数据没有材质或透明度字段。
+项目代码采用 [MIT](LICENSE)。新增四品牌屏幕参考的色号/HEX事实来自用户指定的 pixel-beads 公开色号页，读取于2026-11-17：Perler124、Hama/Midi91、Artkal/S225、MARD291（标准221加扩展70）。这些是该站录入数量，不代表厂家全部在售颜色或官方实物校色；特殊材质不能由单一HEX完整模拟。来源未提供开放数据许可，相关数据不适用本项目MIT授权，公开分发须单独核对权利边界。详见 [色卡来源](frontend/src/palettes/PIXEL-SOURCES.md)。
+
+旧版 [maxcleme/beadcolors](https://github.com/maxcleme/beadcolors) 的220色子集、MIT声明及原始CSV继续保留，供旧项目与实验兼容；旧项目不会因切换新色卡自动改色。
 
 参考 [Zippland/perler-beads](https://github.com/Zippland/perler-beads) 的制图与编辑工作流，当前工程独立实现，未引入其 AGPL 源码或色卡。第三方来源和边界见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -81,7 +83,7 @@ docs/        架构与验证说明
 ## 毕设开发版本
 `main` 已合入本轮功能：项目列表与可恢复删除、主体掩码修补、图纸缩放/移动/连续画笔/吸色/高亮、Worker后台生成与取消、材料CSV和分块打印。高级方案含可选交换优化候选；实验不足以更换默认算法。
 
-开发实例使用8766端口，原8765版本保留。新界面无slogan。
+默认启动与开发代理统一使用8765端口；启动脚本会检查并重建过期页面。新界面无slogan。
 
 - [验收与状态](docs/acceptance.md)
 - [实际测试](docs/testing.md)、[配色实验](docs/experiments.md)

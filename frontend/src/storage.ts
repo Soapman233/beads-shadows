@@ -4,10 +4,14 @@ export type SavedProject = {
   name: string;
   createdAt: number;
   updatedAt: number;
+  revision?: number;
   deleted?: number;
   thumbnail?: string;
   project: Project;
 };
+export class ProjectConflictError extends Error {
+  constructor() { super("此项目已在其他页面更新，请另存副本以保留当前修改"); this.name = "ProjectConflictError"; }
+}
 function db(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     let blocked = false;
@@ -35,18 +39,19 @@ function db(): Promise<IDBDatabase> {
 async function transaction<T>(
   stores: string[],
   mode: IDBTransactionMode,
-  action: (t: IDBTransaction, set: (v: T) => void) => void,
+  action: (t: IDBTransaction, set: (v: T) => void, fail: (e: Error) => void) => void,
 ): Promise<T> {
   const d = await db();
   try {
     return await new Promise<T>((resolve, reject) => {
       const t = d.transaction(stores, mode);
       let value: T;
+      let reason: Error | undefined;
       t.oncomplete = () => resolve(value);
-      t.onerror = () => reject(t.error ?? Error("项目读写失败"));
-      t.onabort = () => reject(t.error ?? Error("项目事务已取消"));
+      t.onerror = () => reject(reason ?? t.error ?? Error("项目读写失败"));
+      t.onabort = () => reject(reason ?? t.error ?? Error("项目事务已取消"));
       try {
-        action(t, (v) => (value = v));
+        action(t, (v) => (value = v), e => { reason = e; t.abort(); });
       } catch (e) {
         t.abort();
         reject(e);
@@ -57,9 +62,9 @@ async function transaction<T>(
   }
 }
 let writes = Promise.resolve();
-function enqueue(action: () => Promise<void>) {
+function enqueue<T>(action: () => Promise<T>) {
   const result = writes.catch(() => {}).then(action);
-  writes = result;
+  writes = result.then(() => {}, () => {});
   return result;
 }
 export async function storeDraft(project: Project) {
@@ -74,13 +79,15 @@ export async function readDraft(): Promise<unknown> {
   });
 }
 // Project-owned resources; direct equality skips unchanged payload writes without hashes.
-export async function saveProject(row: SavedProject) {
+export async function saveProject(row: SavedProject, expectedRevision = row.revision ?? 0) {
   const p = validateProject(row.project);
   if (
     typeof row.id !== "string" ||
     !row.id ||
     !Number.isFinite(row.createdAt) ||
-    !Number.isFinite(row.updatedAt)
+    !Number.isFinite(row.updatedAt) ||
+    !Number.isInteger(expectedRevision) || expectedRevision < 0 ||
+    typeof row.name !== "string"
   )
     return Promise.reject(Error("项目身份无效"));
   const snapshot = structuredClone({
@@ -89,14 +96,19 @@ export async function saveProject(row: SavedProject) {
     project: p,
   });
   return enqueue(() =>
-    transaction<void>(["projects", "resources"], "readwrite", (t) => {
+    transaction<number>(["projects", "resources"], "readwrite", (t, set, fail) => {
       const projects = t.objectStore("projects"),
         resources = t.objectStore("resources"),
         old = projects.get(snapshot.id);
-      old.onsuccess = () =>
+      old.onsuccess = () => {
+        if ((old.result?.revision ?? 0) !== expectedRevision || (!old.result && expectedRevision !== 0)) {
+          fail(new ProjectConflictError());
+          return;
+        }
         projects.put(
           {
             ...snapshot,
+            revision: expectedRevision + 1,
             thumbnail: snapshot.thumbnail ?? old.result?.thumbnail,
             project: { ...snapshot.project, source: undefined, mask: undefined },
             hasSource: !!snapshot.project.source,
@@ -104,6 +116,8 @@ export async function saveProject(row: SavedProject) {
           },
           snapshot.id,
         );
+        set(expectedRevision + 1);
+      };
       for (const key of ["source", "mask"] as const) {
         const id = snapshot.id + ":" + key,
           r = resources.get(id);

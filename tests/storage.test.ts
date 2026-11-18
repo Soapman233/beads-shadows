@@ -45,21 +45,21 @@ test("legacy draft migrates by copy once; independent project resources and reco
     updatedAt: 2,
     project: { ...p, source: "data:image/png;base64,AAAA" },
   };
-  await saveProject(row);
+  let revision = await saveProject(row,0);
   assert.equal(
     (await loadProject("second")).project.source,
     row.project.source,
   );
   assert.equal((await loadProject("legacy-draft")).project.source, undefined);
-  await saveProject({ ...row, deleted: 3 });
+  revision = await saveProject({ ...row, deleted: 3 },revision);
   assert.equal((await loadProject("second")).deleted, 3);
-  await saveProject(row);
+  revision = await saveProject(row,revision);
   assert.equal((await loadProject("second")).deleted, undefined);
   await assert.rejects(() =>
     saveProject({
       ...row,
       project: { ...p, pattern: { ...p.pattern!, cells: ["unknown"] } },
-    }),
+    },revision),
   );
   assert.deepEqual((await loadProject("second")).project.pattern?.cells, [
     "H2",
@@ -124,7 +124,7 @@ test("resource failure rolls back metadata and resources; subsequent save remain
     updatedAt: 2,
     project: { ...fixture(), source: "data:image/png;base64,AAAA" },
   };
-  await saveProject(row);
+  const revision = await saveProject(row,0);
   const put = IDBObjectStore.prototype.put;
   IDBObjectStore.prototype.put = function (value: any, key?: IDBValidKey) {
     if (this.name === "resources" && key === "failure:source")
@@ -137,7 +137,7 @@ test("resource failure rolls back metadata and resources; subsequent save remain
         ...row,
         name: "must roll back",
         project: { ...row.project, source: "data:image/png;base64,BBBB" },
-      }),
+      },revision),
     );
   } finally {
     IDBObjectStore.prototype.put = put;
@@ -145,7 +145,7 @@ test("resource failure rolls back metadata and resources; subsequent save remain
   const after = await loadProject(row.id);
   assert.equal(after.name, "safe");
   assert.equal(after.project.source, row.project.source);
-  await saveProject({ ...row, name: "recovered" });
+  await saveProject({ ...row, name: "recovered" },revision);
   assert.equal((await loadProject(row.id)).name, "recovered");
 });
 
@@ -199,31 +199,31 @@ test("metadata saves skip unchanged resource payload writes; changed mask and co
     return put.call(this, value, key!);
   };
   try {
-    await saveProject(row);
+    let revision = await saveProject(row,0);
     assert.equal(resourcePuts, 2);
     assert.equal(characters, source.length + mask.length);
     resourcePuts = 0;
     characters = 0;
-    await saveProject({ ...row, name: "renamed", updatedAt: 3 });
-    await saveProject({
+    revision = await saveProject({ ...row, name: "renamed", updatedAt: 3 },revision);
+    revision = await saveProject({
       ...row,
       updatedAt: 4,
       project: {
         ...row.project,
         pattern: { ...row.project.pattern!, cells: [null] },
       },
-    });
+    },revision);
     assert.equal(resourcePuts, 0);
     assert.equal(characters, 0);
     t.diagnostic(
       `initial resource puts=2, payload characters=${source.length + mask.length}; two metadata saves resource puts=0, characters=0`,
     );
-    await saveProject({
+    revision = await saveProject({
       ...row,
       project: { ...row.project, mask: "data:image/png;base64,CCCC" },
-    });
+    },revision);
     assert.equal(resourcePuts, 1);
-    await saveProject({ ...row, id: "write-copy" });
+    await saveProject({ ...row, id: "write-copy",revision:0 });
     assert.equal(resourcePuts, 3);
     assert.equal((await loadProject("write-copy")).project.mask, mask);
     assert.equal(
@@ -233,4 +233,37 @@ test("metadata saves skip unchanged resource payload writes; changed mask and co
   } finally {
     IDBObjectStore.prototype.put = put;
   }
+});
+
+test("two snapshots with the same revision cannot overwrite the winning cells or resources",async()=>{
+  const row={id:'cas-race',name:'base',createdAt:1,updatedAt:2,project:{...fixture(),source:'data:image/png;base64,AAAA',mask:'data:image/png;base64,BBBB'}};
+  const revision=await saveProject(row,0);
+  assert.equal(revision,1);
+  const left={...structuredClone(row),revision,name:'winner',project:{...structuredClone(row.project),source:'data:image/png;base64,CCCC',mask:'data:image/png;base64,DDDD',pattern:{...row.project.pattern!,cells:[null]}}};
+  const right={...structuredClone(row),revision,name:'stale',project:{...structuredClone(row.project),source:'data:image/png;base64,EEEE',mask:'data:image/png;base64,FFFF'}};
+  const [first,second]=await Promise.allSettled([saveProject(left),saveProject(right)]);
+  assert.equal(first.status,'fulfilled');
+  assert.equal(second.status,'rejected');
+  if(second.status==='rejected')assert.equal(second.reason.name,'ProjectConflictError');
+  const after=await loadProject(row.id);
+  assert.equal(after.revision,2);assert.equal(after.name,'winner');
+  assert.deepEqual(after.project.pattern!.cells,[null]);
+  assert.equal(after.project.source,'data:image/png;base64,CCCC');
+  assert.equal(after.project.mask,'data:image/png;base64,DDDD');
+  await assert.rejects(()=>saveProject({...right,name:'omitted revision',revision:undefined}),{name:'ProjectConflictError'});
+  assert.deepEqual((await loadProject(row.id)).project,after.project);
+});
+
+test("copying a saved project to a new id starts revision zero and keeps the original independent",async()=>{
+  const original={id:'cas-original',name:'original',createdAt:1,updatedAt:2,project:{...fixture(),source:'data:image/png;base64,AAAA',mask:'data:image/png;base64,BBBB'}};
+  const revision=await saveProject(original,0);
+  const loaded=await loadProject(original.id);
+  const copy={...loaded,id:'cas-copy',name:'copy',revision:0};
+  assert.equal(await saveProject(copy),1);
+  assert.equal(await saveProject({...copy,revision:1,project:{...copy.project,pattern:{...copy.project.pattern!,cells:[null]},mask:'data:image/png;base64,CCCC'}}),2);
+  const after=await loadProject(original.id),savedCopy=await loadProject(copy.id);
+  assert.equal(after.revision,revision);assert.deepEqual(after.project.pattern!.cells,['H2']);
+  assert.equal(after.project.mask,original.project.mask);
+  assert.equal(savedCopy.revision,2);assert.deepEqual(savedCopy.project.pattern!.cells,[null]);
+  assert.equal(savedCopy.project.mask,'data:image/png;base64,CCCC');
 });

@@ -1,3 +1,4 @@
+import { getPalette, type PaletteDefinition } from "./palettes/catalog";
 import { GRID_WIDTHS, COLOR_LIMITS } from "./config";
 import { MARD_COLORS } from "./palettes/mard";
 import { refinePalette, REFINED_ALGORITHM } from "./refinement";
@@ -24,6 +25,7 @@ export type PaletteInfo = {
   note: string;
 };
 export type Pattern = {
+  paletteId?: string;
   constraints?: import("./constraints").Constraints;
   width: number;
   height: number;
@@ -572,6 +574,18 @@ export function rareColors(pattern: Pattern): string[] {
 }
 // Both provenance and exact reference colors are required: a demo/foreign palette
 // can share a code such as D11 while assigning a completely different RGB value.
+/** Match saved references strictly; never reinterpret an old palette under a new brand. */
+export function getPatternPalette(pattern: Pattern): PaletteDefinition | undefined {
+  const definition = getPalette(pattern.paletteId ?? 'legacy-mard220');
+  if (!definition?.available || pattern.paletteInfo?.source !== definition.info.source || !pattern.palette.length) return undefined;
+  const allowed = new Map(definition.colors.map(c => [c.code, c.hex.toLowerCase()]));
+  const seen = new Set<string>();
+  for (const c of pattern.palette) {
+    if (seen.has(c.code) || allowed.get(c.code) !== c.hex.toLowerCase()) return undefined;
+    seen.add(c.code);
+  }
+  return pattern.cells.every(code => code === null || seen.has(code)) ? definition : undefined;
+}
 export function isDefaultPaletteCompatible(pattern: Pattern): boolean {
   if (
     pattern.paletteInfo?.source !== DEFAULT_PALETTE_INFO.source ||
@@ -602,12 +616,13 @@ export function planColorReplace(
   locked: string[] = [],
   region?: GridSelection,
 ): { pattern: Pattern; affected: number } {
-  if (!isDefaultPaletteCompatible(pattern))
+  const reference = getPatternPalette(pattern);
+  if (!reference)
     throw Error(
       "当前图纸与所选来源色卡不兼容，请使用当前参考色卡重新生成后再替换",
     );
   if (fromCode === toCode) throw Error("替换后的色号不能与原色号相同");
-  const target = DEFAULT_PALETTE.find((c) => c.code === toCode);
+  const target = reference.colors.find((c) => c.code === toCode);
   if (!target) throw Error("目标色号不在当前参考色卡中");
   if (!pattern.palette.some((c) => c.code === fromCode))
     throw Error("原色号不在当前图纸色表中");

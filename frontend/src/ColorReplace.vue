@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick } from "vue";
 import {
-  DEFAULT_PALETTE,
-  isDefaultPaletteCompatible,
+  getPatternPalette,
   planColorReplace,
   stats,
   type Pattern,
@@ -20,13 +19,14 @@ const from = ref(""),
   query = ref(""),
   before = ref<HTMLCanvasElement>(),
   after = ref<HTMLCanvasElement>();
-const compatible = computed(() => isDefaultPaletteCompatible(props.pattern));
+const reference = computed(() => getPatternPalette(props.pattern));
+const compatible = computed(() => !!reference.value);
 const counts = computed(() => stats(props.pattern.cells).counts);
 const used = computed(() =>
   props.pattern.palette.filter((c) => counts.value[c.code]),
 );
 const options = computed(() =>
-  DEFAULT_PALETTE.filter((c) =>
+  (reference.value?.colors ?? []).filter((c) =>
     c.code.toLowerCase().includes(query.value.trim().toLowerCase()),
   ),
 );
@@ -34,7 +34,7 @@ const sourceColor = computed(() =>
   props.pattern.palette.find((c) => c.code === from.value),
 );
 const targetColor = computed(() =>
-  DEFAULT_PALETTE.find((c) => c.code === to.value),
+  reference.value?.colors.find((c) => c.code === to.value),
 );
 const result = computed(() => {
   if (scope.value === "selection" && !props.selection)
@@ -113,7 +113,7 @@ function apply() {
         >替代色
         <input v-model="query" aria-label="替代色" placeholder="搜索色号"
       /></label>
-      <p>beadcolors · {{ DEFAULT_PALETTE.length }} 色</p>
+      <p>{{ reference?.name }} · {{ reference?.colors.length }} 色</p>
       <div class="replace-swatches" role="group" aria-label="参考色卡">
         <button
           v-for="c in options"

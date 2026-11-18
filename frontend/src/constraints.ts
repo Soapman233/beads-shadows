@@ -5,6 +5,7 @@ import {
   DEFAULT_PALETTE_NAME,
   DEFAULT_PALETTE_INFO,
   type Pattern,
+  type Color,
   srgbToOklab,
   hexRgb,
   hueDistanceSquared,
@@ -15,7 +16,7 @@ export type Constraints = {
   weight?: number;
 };
 export const CONSTRAINED_ALGORITHM = "hue4-weighted-required-v1";
-export function validateConstraints(v: unknown, k = 32): Constraints {
+export function validateConstraints(v: unknown, k = 32, colors: Color[] = DEFAULT_PALETTE): Constraints {
   const c = v as Constraints;
   if (
     !c ||
@@ -23,7 +24,7 @@ export function validateConstraints(v: unknown, k = 32): Constraints {
     c.required.length > 4 ||
     new Set(c.required).size !== c.required.length ||
     c.required.length > k ||
-    c.required.some((code) => !DEFAULT_PALETTE.some((c) => c.code === code))
+    c.required.some((code) => !colors.some((c) => c.code === code))
   )
     throw Error("候选必选色无效（最多4色，计入颜色上限）");
   if (
@@ -55,12 +56,13 @@ export function generateConstrainedPattern(
   n: number,
   k: number,
   input: Constraints,
+  colors: Color[] = DEFAULT_PALETTE,
 ): Pattern {
-  const c = validateConstraints(input, k);
+  const c = validateConstraints(input, k, colors);
   if (!c.required.length && !c.roi)
-    return generatePattern(pixels, w, h, mask, n, k);
+    return generatePattern(pixels, w, h, mask, n, k, colors);
   const grid = sampleGrid(pixels, w, h, mask, n),
-    labs = DEFAULT_PALETTE.map((c) => srgbToOklab(hexRgb(c.hex)));
+    labs = colors.map((c) => srgbToOklab(hexRgb(c.hex)));
   const points = grid.values.map((v, i) => {
     const x =
         (grid.crop[0] +
@@ -89,7 +91,7 @@ export function generateConstrainedPattern(
       : null;
   });
   const selected = c.required.map((code) =>
-      DEFAULT_PALETTE.findIndex((c) => c.code === code),
+      colors.findIndex((c) => c.code === code),
     ),
     best = Float64Array.from(points, (p) =>
       p && selected.length
@@ -122,7 +124,7 @@ export function generateConstrainedPattern(
       if (!p) return null;
       let best = selected[0];
       for (const j of selected) if (p.dist[j] < p.dist[best]) best = j;
-      return DEFAULT_PALETTE[best].code;
+      return colors[best].code;
     }),
     used = new Set(cells);
   return {
@@ -130,11 +132,11 @@ export function generateConstrainedPattern(
     height: grid.height,
     cells,
     palette: selected
-      .map((i) => DEFAULT_PALETTE[i])
+      .map((i) => colors[i])
       .filter((v) => used.has(v.code) || c.required.includes(v.code)),
     colorLimit: k,
-    paletteName: DEFAULT_PALETTE_NAME,
-    paletteInfo: { ...DEFAULT_PALETTE_INFO },
+    paletteName: colors === DEFAULT_PALETTE ? DEFAULT_PALETTE_NAME : "自定义色卡",
+    ...(colors === DEFAULT_PALETTE ? {paletteInfo: { ...DEFAULT_PALETTE_INFO }} : {}),
     algorithm: CONSTRAINED_ALGORITHM,
     sampling: "mean",
     constraints: c,

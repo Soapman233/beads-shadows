@@ -14,7 +14,6 @@ import {
   isCurrent,
   rareColors,
   planMerge,
-  DEFAULT_PALETTE,
   COLOR_ALGORITHM,
   REFINED_ALGORITHM,
   type Pattern,
@@ -27,6 +26,7 @@ import {
   loadProject,
   listProjects,
   migrateDraft,
+  ProjectConflictError,
   type SavedProject,
 } from "./storage";
 import GridEditor from "./GridEditor.vue";
@@ -39,6 +39,15 @@ import { paint } from "./canvasRenderer";
 import ColorReplace from "./ColorReplace.vue";
 import RegionPicker from "./RegionPicker.vue";
 import PalettePanel from "./PalettePanel.vue";
+import PixelArtImport from "./PixelArtImport.vue";
+import { PALETTES, DEFAULT_PALETTE_ID, getPalette } from "./palettes/catalog";
+import { BUILD_INFO } from "./buildInfo";
+const paletteId = ref(DEFAULT_PALETTE_ID);
+const activePalette = computed(() => getPalette(paletteId.value)!);
+const saveConflict = ref(false);
+const storedRevisions = new Map<string, number>();
+const versionMessage = ref("");
+const initializing = ref(true);
 const gridSelection = ref<import("./engine").GridSelection | null>(null);
 const requiredDraft = ref<string[]>([]),
   constraintError = ref("");
@@ -180,6 +189,7 @@ async function decodeMask(url: string, im: HTMLImageElement) {
 function project(): Project {
   return clone({
     schemaVersion: 2,
+    paletteId: paletteId.value,
     constraints: { required: required.value, roi: roi.value, weight: 3 },
     normalization: normalization.value,
     pattern: pattern.value,
@@ -208,6 +218,7 @@ function thumbnail() {
   return c.toDataURL();
 }
 function queueSave() {
+  if (saveConflict.value) return Promise.reject(new ProjectConflictError());
   const value = project(),
     id = projectId.value,
     name = projectName.value,
@@ -216,16 +227,17 @@ function queueSave() {
     thumb = thumbnail();
   const task = saveSerial
     .catch(() => {})
-    .then(() =>
-      saveProject({
+    .then(async () => {
+      const savedRevision = await saveProject({
         id,
         name,
         createdAt: created,
         updatedAt: Date.now(),
         thumbnail: thumb,
         project: value,
-      }),
-    );
+      }, storedRevisions.get(id) ?? 0);
+      storedRevisions.set(id, savedRevision);
+    });
   saveSerial = task;
   void task.then(
     () => {
@@ -234,15 +246,17 @@ function queueSave() {
         setActiveProject(id);
       }
     },
-    () => {
-      if (id === projectId.value && version === saveVersion)
-        saveStatus.value = "保存失败，请下载项目备份";
+    (e) => {
+      if (id === projectId.value) {
+        if (e instanceof ProjectConflictError) saveConflict.value = true;
+        if (version === saveVersion) saveStatus.value = e instanceof ProjectConflictError ? e.message : "保存失败，请下载项目备份";
+      }
     },
   );
   return task;
 }
 function autosave() {
-  if (restoring || (!sourceUrl.value && !pattern.value)) return;
+  if (restoring || saveConflict.value || (!sourceUrl.value && !pattern.value)) return;
   clearTimeout(saveTimer);
   saveVersion++;
   saveStatus.value = "等待保存…";
@@ -251,7 +265,7 @@ function autosave() {
   }, 450);
 }
 function beforeLeave(e: BeforeUnloadEvent) {
-  if (saveStatus.value.includes("等待") || saveStatus.value.includes("失败")) {
+  if (saveConflict.value || saveStatus.value.includes("等待") || saveStatus.value.includes("失败")) {
     e.preventDefault();
     e.returnValue = "";
   }
@@ -259,7 +273,7 @@ function beforeLeave(e: BeforeUnloadEvent) {
 window.addEventListener("beforeunload", beforeLeave);
 onBeforeUnmount(() => window.removeEventListener("beforeunload", beforeLeave));
 watch(
-  [advancedWidth, advancedColors, required, roi],
+  [advancedWidth, advancedColors, required, roi, paletteId],
   () => {
     generation.cancel();
     revision.value++;
@@ -285,6 +299,7 @@ watch(
     advancedColors,
     required,
     roi,
+    paletteId,
   ],
   autosave,
   { deep: true },
@@ -308,6 +323,8 @@ async function restore(p: Project, row?: SavedProject) {
   clearTimeout(saveTimer);
   saveVersion++;
   restoring = true;
+  saveConflict.value = false;
+  paletteId.value = p.paletteId ?? p.pattern?.paletteId ?? "legacy-mard220";
   gridSelection.value = null;
   resetConstraints(p.constraints);
   normalization.value = p.normalization;
@@ -316,6 +333,7 @@ async function restore(p: Project, row?: SavedProject) {
     projectId.value = row.id;
     projectName.value = row.name;
     createdAt.value = row.createdAt;
+    storedRevisions.set(row.id, row.revision ?? 0);
   }
   sourceUrl.value = p.source;
   image.value = im;
@@ -343,11 +361,11 @@ async function restore(p: Project, row?: SavedProject) {
   restoring = false;
   drawAll();
   status.value = im ? "项目已恢复" : "已打开图纸（无原图）";
-  autosave();
+  if (row) saveStatus.value = "已自动保存";
+  else autosave();
 }
 onMounted(() => {
-  void api("/health")
-    .then((v) => (health.value = v))
+  void checkVersion()
     .catch(
       () =>
         (health.value = {
@@ -365,13 +383,31 @@ onMounted(() => {
           rows.find((r) => !r.deleted);
       if (row && revision.value === 0) {
         const full = await loadProject(row.id);
-        if (revision.value === 0) await restore(full.project, row);
+        if (revision.value === 0) await restore(full.project, full);
       }
     } catch {
       saveStatus.value = "草稿恢复失败，可打开已导出的项目";
+    } finally {
+      initializing.value = false;
     }
   })();
 });
+async function checkVersion() {
+  const v = await api("/health");
+  health.value = v;
+  versionMessage.value = v.appId !== "beads-shadows"
+    ? "后端版本未识别，请用本工程启动脚本重启服务。"
+    : BUILD_INFO.buildId !== "development" && v.frontendBuild?.buildId !== BUILD_INFO.buildId
+      ? "有新版本可用，请保存后刷新。" : "";
+}
+function checkOnFocus() { void checkVersion().catch(() => {}); }
+window.addEventListener("focus", checkOnFocus);
+onBeforeUnmount(() => window.removeEventListener("focus", checkOnFocus));
+async function refreshVersion() {
+  try { settleTasks(); await flushProject(); window.location.reload(); }
+  catch (e) { error.value = (e as Error).message; }
+}
+watch(paletteId, () => { if (!restoring) { resetConstraints(); if (step.value === 2) step.value = 1; } });
 const replacement = ref(false);
 let resolveReplacement: ((v: boolean) => void) | undefined;
 function allowReplace(): Promise<boolean> {
@@ -387,6 +423,7 @@ function confirmReplace(v: boolean) {
   resolveReplacement = undefined;
 }
 async function upload(e: Event) {
+  if (uploading.value || transitioning.value) return;
   const f = (e.target as HTMLInputElement).files?.[0];
   if (!f || !(await allowReplace())) return;
   if (f.size > 20 * 1024 * 1024) {
@@ -433,11 +470,33 @@ async function upload(e: Event) {
     await nextTick();
     drawAll();
   } catch (e) {
-    error.value = (e as Error).message;
+    if (rev === revision.value) error.value = (e as Error).message;
   } finally {
     uploading.value = false;
   }
   (e.target as HTMLInputElement).value = "";
+}
+async function adoptPixelArt(file: File) {
+  if (transitioning.value || uploading.value || processing.value || generating.value) return;
+  transitioning.value = true;
+  try {
+    settleTasks();
+    await flushProject();
+    const form = new FormData(); form.append('file', file);
+    const result = await api('/images', { method: 'POST', body: form });
+    await loadImage(result.image);
+    const now = Date.now();
+    const p: Project = { schemaVersion: 2, source: result.image, normalization: result.normalization?.version,
+      paletteId: paletteId.value, points: [], locked: [], step: 1, pitch: pitch.value,
+      selectionMode: 'whole', selectionDirty: false,
+      tuning: { width: advancedWidth.value, colors: advancedColors.value } };
+    const row = { id: crypto.randomUUID(), name: (projectName.value + ' · 像素画').slice(0, 80), createdAt: now, updatedAt: now, project: p };
+    const savedRevision = await saveProject(row, 0);
+    await restore(p, { ...row, revision: savedRevision });
+    whole();
+    await makeCandidates();
+  } catch (e) { error.value = (e as Error).message; }
+  finally { transitioning.value = false; }
 }
 function whole() {
   maskPast.value = [];
@@ -643,6 +702,7 @@ function down(e: PointerEvent) {
     selectionDirty.value = true;
     sourceCanvas.value!.setPointerCapture(e.pointerId);
   } else if (box.value) {
+    if (points.value.length >= 200) { error.value = "修正点最多200个，请撤回部分点后继续"; return; }
     points.value.push({ ...p, label: tool.value === "keep" ? 1 : 0 });
     changed();
   }
@@ -715,6 +775,7 @@ function schedule() {
   timer = setTimeout(segment, 300);
 }
 async function segment() {
+  if (points.value.length > 200) { error.value = "此项目超过200个修正点，请撤回部分点后重新提取"; return; }
   if (
     processing.value ||
     !box.value ||
@@ -828,7 +889,7 @@ async function makeCandidates() {
   try {
     const t = performance.now(),
       im = image.value!;
-    const out = await generation.run(rgba(), mask.value, im.width, im.height);
+    const out = await generation.run(rgba(), mask.value, im.width, im.height, false, advancedWidth.value, advancedColors.value, undefined, paletteId.value);
     if (rev !== revision.value) return;
     candidates.value = out;
     timings.value = { ...timings.value, candidatesMs: performance.now() - t };
@@ -905,6 +966,8 @@ async function customCandidate() {
       true,
       advancedWidth.value,
       advancedColors.value,
+      undefined,
+      paletteId.value,
     );
     if (rev !== revision.value) return;
     candidates.value = result;
@@ -925,6 +988,7 @@ function applyConstraints(withROI: boolean) {
         weight: 3,
       },
       advancedColors.value,
+      activePalette.value.colors,
     );
     required.value = c.required;
     roi.value = c.roi;
@@ -948,6 +1012,7 @@ async function detailCandidate() {
       advancedWidth.value,
       advancedColors.value,
       { required: required.value, roi: roi.value, weight: 3 },
+      paletteId.value,
     );
     if (rev !== revision.value) return;
     candidates.value = out;
@@ -1084,8 +1149,8 @@ async function openProject(e: Event) {
         updatedAt: now,
         project: p,
       };
-    await saveProject(row);
-    await restore(p, row);
+    const savedRevision = await saveProject(row);
+    await restore(p, { ...row, revision: savedRevision });
     error.value = "";
   } catch (e) {
     error.value = (e as Error).message;
@@ -1101,7 +1166,10 @@ function settleTasks() {
   clearTimeout(timer);
 }
 async function flushProject() {
+  await nextTick();
   clearTimeout(saveTimer);
+  if (saveConflict.value) throw new ProjectConflictError();
+  if (saveStatus.value === "已自动保存") { await saveSerial; return; }
   saveVersion++;
   if (sourceUrl.value || pattern.value) {
     saveStatus.value = "等待保存…";
@@ -1131,7 +1199,6 @@ async function switchProject(row: SavedProject) {
       await restore(latest.project, latest);
     }
     showProjects.value = false;
-    autosave();
   } catch (e) {
     error.value = (e as Error).message;
   } finally {
@@ -1168,6 +1235,14 @@ async function newProject() {
     step.value = 1;
     projectId.value = crypto.randomUUID();
     projectName.value = "未命名";
+    paletteId.value = DEFAULT_PALETTE_ID;
+    advancedWidth.value = 64;
+    advancedColors.value = 16;
+    pitch.value = 2.6;
+    chosen.value = null;
+    merge.value = undefined;
+    mode.value = "";
+    timings.value = {};
     normalization.value = undefined;
     resetConstraints();
     gridSelection.value = null;
@@ -1191,13 +1266,31 @@ async function go(n: number) {
   await nextTick();
   drawAll();
 }
+async function saveAsCopy() {
+  if (transitioning.value || uploading.value) return;
+  transitioning.value = true;
+  try {
+    settleTasks(); clearTimeout(saveTimer); saveVersion++;
+    await saveSerial.catch(() => {});
+    const now = Date.now(), row = { id: crypto.randomUUID(), name: projectName.value + " 副本", createdAt: now, updatedAt: now, project: project() };
+    const savedRevision = await saveProject(row, 0);
+    restoring = true;
+    projectId.value = row.id; projectName.value = row.name; createdAt.value = now;
+    storedRevisions.set(row.id, savedRevision); setActiveProject(row.id);
+    saveConflict.value = false; error.value = "";
+    await nextTick(); restoring = false; saveStatus.value = "已自动保存";
+  } catch (e) { error.value = (e as Error).message; }
+  finally { restoring = false; transitioning.value = false; }
+}
 </script>
 <template>
-  <header :inert="transitioning || showProjects">
+  <header :inert="initializing || transitioning || showProjects || uploading">
     <a class="brand" href="/">豆影</a
     ><button @click="openDirectory">项目</button
     ><button v-if="sourceUrl || pattern" @click="exportProject">下载项目</button
-    ><span class="runtime">{{ saveStatus }}</span
+    ><button v-if="saveConflict" @click="saveAsCopy">另存副本</button>
+    <span class="project-title">{{ projectName }}</span>
+    <span class="runtime">{{ saveStatus }}</span
     ><label class="upload"
       >打开项目<input
         aria-label="打开项目"
@@ -1207,7 +1300,13 @@ async function go(n: number) {
         @change="openProject"
     /></label>
   </header>
-  <main :inert="transitioning">
+  <main :inert="initializing || transitioning || uploading">
+    <div v-if="initializing" class="notice" role="status">正在恢复项目…</div>
+    <div v-if="versionMessage" class="notice" role="status">{{ versionMessage }} <button @click="refreshVersion">保存并刷新</button></div>
+    <div v-if="!showProjects" class="palette-choice">
+      <label>生成色卡 <select v-model="paletteId" aria-label="生成色卡"><option v-for="p in PALETTES" :key="p.id" :value="p.id" :disabled="!p.available">{{ p.name }} · {{ p.colors.length }} 色</option></select></label>
+      <span>{{ activePalette.info.series }}</span>
+    </div>
     <ProjectList
       v-if="showProjects"
       :current="projectId"
@@ -1259,6 +1358,7 @@ async function go(n: number) {
         {{ processing ? "正在提取…" : status }}
       </div>
       <div v-if="error" role="alert" class="error">{{ error }}</div>
+      <PixelArtImport v-if="step === 1 && sourceUrl" :key="projectId" :source="sourceUrl" :busy="uploading || processing || generating || transitioning" @adopt="adoptPixelArt" />
       <section v-show="step === 1" class="workspace">
         <div class="panel">
           <div class="panel-heading">
@@ -1394,7 +1494,7 @@ async function go(n: number) {
                 multiple
                 v-model="requiredDraft"
               >
-                <option v-for="c in DEFAULT_PALETTE" :value="c.code">
+                <option v-for="c in activePalette.colors" :value="c.code">
                   {{ c.code }}
                 </option>
               </select></label
@@ -1533,6 +1633,7 @@ async function go(n: number) {
       </section>
       <details class="details">
         <summary>项目信息</summary>
+        <p>版本 {{ BUILD_INFO.buildId }} · {{ BUILD_INFO.builtAt }}</p>
         <p>
           {{ mode || health.mode }} · {{ health.device }} · {{ health.detail }}
         </p>

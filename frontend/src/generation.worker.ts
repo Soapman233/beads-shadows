@@ -1,12 +1,15 @@
+import { getPalette } from "./palettes/catalog";
 import { generateConstrainedPattern } from "./constraints";
 import {
   generateCandidates,
   generatePattern,
   generateRefinedPattern,
-  DEFAULT_PALETTE,
 } from "./engine";
 self.onmessage = ({ data: v }) => {
   try {
+    const palette = getPalette(v.paletteId ?? "legacy-mard220");
+    if (!palette?.available) throw Error("所选色卡当前不可用");
+    const colors = palette.colors;
     const pixels = new Uint8ClampedArray(v.pixels),
       mask = new Uint8Array(v.mask);
     const result = v.constraints
@@ -20,7 +23,7 @@ self.onmessage = ({ data: v }) => {
               mask,
               v.n,
               v.k,
-              DEFAULT_PALETTE,
+              colors,
               "mean",
             ),
           },
@@ -34,6 +37,7 @@ self.onmessage = ({ data: v }) => {
               v.n,
               v.k,
               v.constraints,
+              colors,
             ),
           },
         ]
@@ -48,7 +52,7 @@ self.onmessage = ({ data: v }) => {
                 mask,
                 v.n,
                 v.k,
-                DEFAULT_PALETTE,
+                colors,
                 sampling,
               ),
             }))
@@ -62,11 +66,15 @@ self.onmessage = ({ data: v }) => {
                   mask,
                   v.n,
                   v.k,
+                  colors,
                 ),
               },
             ])
-        : generateCandidates(pixels, v.width, v.height, mask);
-    self.postMessage({ id: v.id, result });
+        : generateCandidates(pixels, v.width, v.height, mask, colors);
+    self.postMessage({ id: v.id, result: result.map(candidate => ({
+      ...candidate,
+      pattern: {...candidate.pattern, paletteId: palette.id, paletteName: palette.name, paletteInfo: {...palette.info}},
+    })) });
   } catch (e) {
     self.postMessage({ id: v.id, error: (e as Error).message });
   }
