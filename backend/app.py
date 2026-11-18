@@ -21,6 +21,7 @@ from PIL import Image, UnidentifiedImageError
 from image_store import ImageStore, ImageUnavailable
 from normalization import normalize_image, NORMALIZATION_VERSION
 from pydantic import BaseModel, Field
+from ai_images import router as ai_router
 
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 20_000_000
@@ -77,6 +78,7 @@ def initialize_model():
 
 initialize_model()
 app = FastAPI(title='拼豆 MVP 分割服务')
+app.include_router(ai_router)
 @app.middleware('http')
 async def production_api_prefix(request, call_next):
     # Same-origin production UI uses /api; Vite strips this prefix in dev.
