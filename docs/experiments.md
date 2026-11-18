@@ -74,3 +74,5 @@ CPU JavaScript Node v24.14.0 / win32 x64，每例本循环首次和接着3次毫
 ## 用户角色图私有回归
 同一历史source/mask、64×91、K16、mean，正式默认与swap均3388豆16色；cells变化0，DE00均值5.41443468、P95 12.36623923，hue目标0.001419595783。已实际复验，无改善；未重分割。数据位于experiments/private/user-regression.json，不公开私图。
 输入准备脚本现使用仓库examples/dataset，不再依赖旧mvp目录；公开样例只包含NASA/CC0及原创图案。
+
+本轮补充：运行算法约束实验见[可靠性迭代实验](iteration-experiments.md)，公开输入已扩到18份。旧12份表保留作历史基线，新6图不用于调参；参数3的ROI策略仍有局部/全局退化，没有替换默认。

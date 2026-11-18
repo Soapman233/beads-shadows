@@ -30,3 +30,11 @@ JavaScript dependency versions are recorded in frontend/package-lock.json. Pytho
 fake-indexeddb (Apache-2.0) is a development-only IndexedDB test implementation; installed via npm and recorded in package-lock.json. No source is vendored. License: https://github.com/dumbmatter/fakeIndexedDB/blob/master/LICENSE .
 
 examples/dataset contains NASA public-domain astronaut and CC0 Chelsea/coffee images; attribution and pinned source URLs are in examples/dataset/SOURCES.md. examples/geometric.png is an original synthetic fixture, covered by this project license. No private user image is included.
+
+本轮新增照片：brick、grass、gravel、camera为CC0，clock、rocket为公有领域，作者与固定版本源文件详见examples/dataset/SOURCES.md。六图只扩充真实图片证据，五张灰度、一张彩色，不能视为完整彩色插画集。Prettier3.6.2仅作为临时开发格式化工具运行（MIT），不作为应用运行依赖或源码分发。
+
+## pixel-beads public color-reference facts (2026-11-17)
+
+User-requested reference: public Perler, Hama/Midi, Artkal/S and MARD chart pages at https://www.pixel-beads.com/zh/ . Only numeric code/HEX facts are recorded in `frontend/src/palettes/pixel-{perler,hama,artkal,mard}.ts`, containing 124/91/225/291 unique codes respectively. Source URLs, extraction method and limitations are recorded in `frontend/src/palettes/PIXEL-SOURCES.md`. No site implementation, descriptions, color names, imagery or logos are included.
+
+The source does not provide an open data license. These records are expressly outside this project's MIT grant; inclusion is not a claim of manufacturer authorization, open licensing or permission for unrestricted redistribution. Review data rights separately before public distribution. Legacy beadcolors MIT data remains separately identified and unchanged.

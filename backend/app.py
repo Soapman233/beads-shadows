@@ -2,6 +2,7 @@
 from __future__ import annotations
 import base64
 import io
+import json
 import os
 import sys
 import threading
@@ -20,11 +21,15 @@ from PIL import Image, UnidentifiedImageError
 from image_store import ImageStore, ImageUnavailable
 from normalization import normalize_image, NORMALIZATION_VERSION
 from pydantic import BaseModel, Field
+from ai_images import router as ai_router
 
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 20_000_000
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 ROOT = Path(__file__).resolve().parent
+APP_ID = 'beads-shadows'
+BACKEND_VERSION = '2026.11.17.1'
+FRONTEND_DIST = ROOT.parent / 'frontend' / 'dist'
 lock = threading.Lock()
 encoded_image_id = None
 
@@ -73,12 +78,17 @@ def initialize_model():
 
 initialize_model()
 app = FastAPI(title='拼豆 MVP 分割服务')
+app.include_router(ai_router)
 @app.middleware('http')
 async def production_api_prefix(request, call_next):
     # Same-origin production UI uses /api; Vite strips this prefix in dev.
+    public_path = request.scope['path']
     if request.scope['path'].startswith('/api/'):
         request.scope['path'] = request.scope['path'][4:]
-    return await call_next(request)
+    response = await call_next(request)
+    if public_path in ('/', '/index.html', '/build-info.json', '/health', '/api/health') or public_path.endswith('.html'):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
 
 app.add_middleware(CORSMiddleware, allow_origins=['http://localhost:5173', 'http://127.0.0.1:5173'], allow_methods=['GET','POST'], allow_headers=['Content-Type'])
 
@@ -101,9 +111,20 @@ def png_url(image: Image.Image):
     image.save(output, format='PNG')
     return 'data:image/png;base64,' + base64.b64encode(output.getvalue()).decode('ascii')
 
+def frontend_build_info():
+    try:
+        info = json.loads((FRONTEND_DIST / 'build-info.json').read_text(encoding='utf-8'))
+        if info.get('appId') == APP_ID and all(isinstance(info.get(key), str) for key in ('buildId', 'builtAt')):
+            return {key: info[key] for key in ('appId', 'buildId', 'builtAt')}
+    except (OSError, ValueError, AttributeError):
+        pass
+    return None
+
 @app.get('/health')
 def health():
-    return {'ready': True, 'mode': mode, 'device': device, 'detail': detail, 'normalizationVersion': NORMALIZATION_VERSION, 'imageStore': {'maxImages':store.max_images,'maxBytes':store.max_bytes,'idleTtlSeconds':store.ttl_seconds}}
+    return {'appId': APP_ID, 'backendVersion': BACKEND_VERSION,
+            'frontendAvailable': (FRONTEND_DIST / 'index.html').is_file(),
+            'frontendBuild': frontend_build_info(), 'ready': True, 'mode': mode, 'device': device, 'detail': detail, 'normalizationVersion': NORMALIZATION_VERSION, 'imageStore': {'maxImages':store.max_images,'maxBytes':store.max_bytes,'idleTtlSeconds':store.ttl_seconds}}
 
 @app.post('/images')
 async def upload(file: UploadFile = File(...)):
@@ -201,7 +222,7 @@ def segment(request: SegmentRequest):
             raise HTTPException(503,f'分割失败：{type(exc).__name__}: {exc}') from exc
         return {'imageId':request.imageId,'revision':request.revision,'mask':png_url(Image.fromarray(result)),'mode':mode,'device':device,'timings':{'encodeMs':round(encode_ms,2),'segmentMs':round(segment_ms,2)}}
 
-dist=ROOT.parent/'frontend/dist'
+dist=FRONTEND_DIST
 if dist.exists():
     app.mount('/', StaticFiles(directory=dist, html=True), name='frontend')
 
