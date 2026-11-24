@@ -5,6 +5,7 @@ createRequire(new URL("../frontend/package.json", import.meta.url))(
   "fake-indexeddb/auto",
 );
 import {
+  createProjectStorage,
   storeDraft,
   readDraft,
   migrateDraft,
@@ -82,6 +83,29 @@ const fixture = (): Project => ({
   pitch: 2.6,
   selectionMode: "whole",
   selectionDirty: false,
+});
+
+test("two account caches with the same project id keep independent resources and remote revisions", async () => {
+  const first = createProjectStorage("account-a");
+  const second = createProjectStorage("account-b");
+  const row = { id: "shared-id", name: "A", createdAt: 1, updatedAt: 2, project: fixture() };
+  const resourceA = "data:image/png;base64,AAAA";
+  const resourceB = "data:image/png;base64,BBBB";
+  const cloudA = { id: "remote-a", revision: 7 };
+  const cloudB = { id: "remote-b", revision: 3 };
+  await first.saveProject({ ...row, project: { ...row.project, source: resourceA }, cloud: cloudA });
+  assert.equal((await second.listProjects()).length, 0);
+  await assert.rejects(() => second.loadProject(row.id));
+  await second.saveProject({ ...row, name: "B", project: { ...row.project, source: resourceB }, cloud: cloudB });
+  for (const [store, name, source, cloud] of [
+    [first, "A", resourceA, cloudA], [second, "B", resourceB, cloudB],
+  ] as const) {
+    const saved = await store.loadProject(row.id);
+    assert.equal(saved.name, name);
+    assert.equal(saved.project.source, source);
+    assert.deepEqual(saved.cloud, cloud);
+  }
+  await assert.rejects(() => loadProject(row.id));
 });
 
 test("queued writes capture caller state and retain thumbnail on metadata updates", async () => {

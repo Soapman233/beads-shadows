@@ -1,5 +1,13 @@
 # 本地图像 API
 
+## 多用户接口
+
+配置 MySQL 后可使用 /docs 查看当前请求字段。业务接口按 /api 前缀同源调用。账号写操作使用 X-CSRF-Token，会话界面使用 X-Bead-Account 核对身份。私有资源通过所属账号或明确协作关系授权。
+
+接口分组为 auth、account、assets、projects、palettes、inventory、builds、publications、notifications、ai、collab、shop、admin。[验收索引](full-platform-acceptance.md)
+
+## 本地兼容模式
+
 服务仅供本地单用户使用。默认监听回环地址；开发服务器代理 `/api` 到后端，生产服务同时接受下述裸路径与 `/api` 前缀。默认端口可由启动命令指定，不绑定用户当前活动的旧工程端口进行测试。
 
 ## 健康检查
