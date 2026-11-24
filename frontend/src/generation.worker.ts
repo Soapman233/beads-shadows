@@ -7,7 +7,7 @@ import {
 } from "./engine";
 self.onmessage = ({ data: v }) => {
   try {
-    const palette = getPalette(v.paletteId ?? "legacy-mard220");
+    const palette = v.palette ?? getPalette(v.paletteId ?? "legacy-mard220");
     if (!palette?.available) throw Error("所选色卡当前不可用");
     const colors = palette.colors;
     const pixels = new Uint8ClampedArray(v.pixels),

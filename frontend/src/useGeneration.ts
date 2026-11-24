@@ -35,6 +35,7 @@ export function useGeneration() {
     k = 16,
     constraints?: import("./constraints").Constraints,
     paletteId = "legacy-mard220",
+    stockCodes?: string[],
   ) {
     cancel();
     const id = ++serial;
@@ -59,10 +60,12 @@ export function useGeneration() {
         try {
           const palette = getPalette(paletteId);
           if (!palette?.available) throw Error("所选色卡当前不可用");
+          const colors = stockCodes ? palette.colors.filter(c => stockCodes.includes(c.code)) : palette.colors;
+          if (!colors.length) throw Error("所选色卡没有可用库存");
           // Rebuild plain arrays at the transport boundary: Vue Proxy values
           // are valid inputs but cannot be structured-cloned by postMessage.
           const plainConstraints = constraints
-            ? validateConstraints(constraints, k, palette.colors)
+            ? validateConstraints(constraints, k, colors)
             : undefined;
           current = new Worker(
             new URL("./generation.worker.ts", import.meta.url),
@@ -95,6 +98,7 @@ export function useGeneration() {
               k,
               constraints: plainConstraints,
               paletteId,
+              ...(paletteId.startsWith("db:") ? { palette: structuredClone({ ...palette, colors }) } : {}),
             },
             [p.buffer, m.buffer],
           );

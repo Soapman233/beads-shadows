@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>豆影导入设置</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <h1>豆影导入设置</h1>
+  <form>
+    <label for="target">豆影服务地址</label>
+    <input id="target" type="url" inputmode="url" required maxlength="240">
+    <button>保存地址</button>
+  </form>
+  <p>在网页图片上右键，选择「导入豆影」。在豆影页面确认后导入。</p>
+  <p role="status" aria-live="polite"></p>
+  <script src="options.js" type="module"></script>
+</body>
+</html>

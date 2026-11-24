@@ -1,15 +1,15 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import {
-  listProjects,
-  loadProject,
-  saveProject,
+  type ProjectStorage,
   type SavedProject,
 } from "./storage";
 const props = defineProps<{
+  storage: ProjectStorage;
   current: string;
   beforeAction: (id: string, name?: string) => Promise<void>;
 }>();
+const { listProjects, loadProject, saveProject } = props.storage;
 const emit = defineEmits<{
   open: [row: SavedProject];
   create: [];
@@ -53,6 +53,7 @@ async function change(row: SavedProject, action: string) {
     if (action === "copy") {
       full.id = crypto.randomUUID();
       full.revision = 0;
+      delete full.cloud;
       full.name += " 副本";
       full.createdAt = Date.now();
     } else if (action === "delete") full.deleted = Date.now();

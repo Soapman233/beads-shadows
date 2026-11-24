@@ -1,0 +1,6 @@
+body { min-width: 290px; max-width: 34rem; padding: 1rem; color: #20372e; background: #f3f4ee; font: 14px/1.5 system-ui, sans-serif; }
+h1 { margin: 0 0 1rem; font-size: 1.15rem; }
+form { display: grid; gap: .5rem; }
+input, button { padding: .5rem; font: inherit; border: 1px solid #b6c9bd; border-radius: .3rem; }
+button { justify-self: start; background: #235b46; color: white; cursor: pointer; }
+[role=status] { color: #225542; }

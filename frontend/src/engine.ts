@@ -577,7 +577,7 @@ export function rareColors(pattern: Pattern): string[] {
 /** Match saved references strictly; never reinterpret an old palette under a new brand. */
 export function getPatternPalette(pattern: Pattern): PaletteDefinition | undefined {
   const definition = getPalette(pattern.paletteId ?? 'legacy-mard220');
-  if (!definition?.available || pattern.paletteInfo?.source !== definition.info.source || !pattern.palette.length) return undefined;
+  if (!definition || pattern.paletteInfo?.source !== definition.info.source || !pattern.palette.length) return undefined;
   const allowed = new Map(definition.colors.map(c => [c.code, c.hex.toLowerCase()]));
   const seen = new Set<string>();
   for (const c of pattern.palette) {

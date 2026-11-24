@@ -1,0 +1,31 @@
+plugins {
+    id "com.android.application" version "8.7.3"
+}
+
+def appOrigin = providers.gradleProperty("beadsOrigin").orElse("http://127.0.0.1:8784").get()
+def parsed = new URI(appOrigin)
+if (!(parsed.scheme in ["https", "http"]) || !parsed.host || parsed.userInfo ||
+        parsed.query || parsed.fragment || !(parsed.path in ["", "/"]) ||
+        (parsed.scheme == "http" && parsed.host != "127.0.0.1")) {
+    throw new GradleException("Set beadsOrigin to an HTTPS origin or an isolated 127.0.0.1 development origin.")
+}
+
+android {
+    namespace "org.beadsshadow.mobile"
+    compileSdk 35
+    defaultConfig {
+        applicationId "org.beadsshadow.mobile"
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName "0.1.0"
+        buildConfigField "String", "BEADS_ORIGIN", '"' + appOrigin + '"'
+    }
+    buildFeatures {
+        buildConfig true
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

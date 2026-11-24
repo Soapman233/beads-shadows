@@ -20,12 +20,7 @@ import {
 } from "./engine";
 import { type Project, parseProject } from "./project";
 import {
-  getActiveProject,
-  setActiveProject,
-  saveProject,
-  loadProject,
-  listProjects,
-  migrateDraft,
+  type ProjectStorage,
   ProjectConflictError,
   type SavedProject,
 } from "./storage";
@@ -40,10 +35,25 @@ import ColorReplace from "./ColorReplace.vue";
 import RegionPicker from "./RegionPicker.vue";
 import PalettePanel from "./PalettePanel.vue";
 import PixelArtImport from "./PixelArtImport.vue";
-import { PALETTES, DEFAULT_PALETTE_ID, getPalette } from "./palettes/catalog";
+import { DATABASE_PALETTES, PALETTES, DEFAULT_PALETTE_ID, getPalette, isDatabasePalette, loadDatabasePalette } from "./palettes/catalog";
 import { BUILD_INFO } from "./buildInfo";
-const paletteId = ref(DEFAULT_PALETTE_ID);
-const activePalette = computed(() => getPalette(paletteId.value)!);
+import { platformApi, type AccountSession } from "./platformApi";
+const props = defineProps<{ storage: ProjectStorage; session: AccountSession }>();
+const { getActiveProject, setActiveProject, saveProject, loadProject, listProjects, migrateDraft } = props.storage;
+const cloud = ref<SavedProject["cloud"]>();
+function preferredPalette() {
+  const id = props.session.user?.preferredPalette;
+  return id && getPalette(id)?.available ? id : DEFAULT_PALETTE_ID;
+}
+const paletteId = ref(preferredPalette());
+const activePalette = computed(() => getPalette(paletteId.value));
+const paletteOptions = computed(() => [...DATABASE_PALETTES.values(), ...PALETTES]);
+const personalStock = ref(false);
+async function getStockCodes() {
+  if (!personalStock.value || !isDatabasePalette(paletteId.value)) return undefined;
+  const result = await api("/inventory/available-colors/" + paletteId.value.slice(3)) as { colors: { code: string }[] };
+  return result.colors.map(color => color.code);
+}
 const saveConflict = ref(false);
 const storedRevisions = new Map<string, number>();
 const versionMessage = ref("");
@@ -135,14 +145,7 @@ let start: { x: number; y: number } | null = null,
   saveSerial = Promise.resolve();
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 async function api(path: string, options?: RequestInit) {
-  const r = await fetch("/api" + path, options),
-    v = await r.json();
-  if (!r.ok)
-    throw Object.assign(
-      Error(typeof v.detail === "string" ? v.detail : "请求失败"),
-      { status: r.status, code: v.code },
-    );
-  return v;
+  return platformApi<any>(path, options, props.session);
 }
 const loadImage = (url: string) =>
   new Promise<HTMLImageElement>((resolve, reject) => {
@@ -224,7 +227,8 @@ function queueSave() {
     name = projectName.value,
     created = createdAt.value,
     version = saveVersion,
-    thumb = thumbnail();
+    thumb = thumbnail(),
+    cloudLink = cloud.value ? { ...cloud.value } : undefined;
   const task = saveSerial
     .catch(() => {})
     .then(async () => {
@@ -235,6 +239,7 @@ function queueSave() {
         updatedAt: Date.now(),
         thumbnail: thumb,
         project: value,
+        cloud: cloudLink,
       }, storedRevisions.get(id) ?? 0);
       storedRevisions.set(id, savedRevision);
     });
@@ -255,8 +260,9 @@ function queueSave() {
   );
   return task;
 }
-function autosave() {
+function autosave(markPending = true) {
   if (restoring || saveConflict.value || (!sourceUrl.value && !pattern.value)) return;
+  if (markPending && cloud.value && !cloud.value.pending) cloud.value = { ...cloud.value, pending: true };
   clearTimeout(saveTimer);
   saveVersion++;
   saveStatus.value = "等待保存…";
@@ -272,8 +278,13 @@ function beforeLeave(e: BeforeUnloadEvent) {
 }
 window.addEventListener("beforeunload", beforeLeave);
 onBeforeUnmount(() => window.removeEventListener("beforeunload", beforeLeave));
+onBeforeUnmount(() => {
+  clearTimeout(saveTimer);
+  clearTimeout(timer);
+  revision.value++;
+});
 watch(
-  [advancedWidth, advancedColors, required, roi, paletteId],
+  [advancedWidth, advancedColors, required, roi, paletteId, personalStock],
   () => {
     generation.cancel();
     revision.value++;
@@ -301,7 +312,7 @@ watch(
     roi,
     paletteId,
   ],
-  autosave,
+  () => autosave(),
   { deep: true },
 );
 async function restore(p: Project, row?: SavedProject) {
@@ -325,6 +336,8 @@ async function restore(p: Project, row?: SavedProject) {
   restoring = true;
   saveConflict.value = false;
   paletteId.value = p.paletteId ?? p.pattern?.paletteId ?? "legacy-mard220";
+  if (isDatabasePalette(paletteId.value) && !activePalette.value)
+    void loadDatabasePalette(paletteId.value.slice(3)).catch(() => {});
   gridSelection.value = null;
   resetConstraints(p.constraints);
   normalization.value = p.normalization;
@@ -334,6 +347,7 @@ async function restore(p: Project, row?: SavedProject) {
     projectName.value = row.name;
     createdAt.value = row.createdAt;
     storedRevisions.set(row.id, row.revision ?? 0);
+    cloud.value = row.cloud;
   }
   sourceUrl.value = p.source;
   image.value = im;
@@ -407,7 +421,7 @@ async function refreshVersion() {
   try { settleTasks(); await flushProject(); window.location.reload(); }
   catch (e) { error.value = (e as Error).message; }
 }
-watch(paletteId, () => { if (!restoring) { resetConstraints(); if (step.value === 2) step.value = 1; } });
+watch(paletteId, () => { personalStock.value = false; if (!restoring) { resetConstraints(); if (step.value === 2) step.value = 1; } });
 const replacement = ref(false);
 let resolveReplacement: ((v: boolean) => void) | undefined;
 function allowReplace(): Promise<boolean> {
@@ -423,9 +437,14 @@ function confirmReplace(v: boolean) {
   resolveReplacement = undefined;
 }
 async function upload(e: Event) {
+  const target = e.target as HTMLInputElement;
+  const file = target.files?.[0];
+  target.value = "";
+  if (file) await importImage(file);
+}
+async function importImage(f: File) {
   if (uploading.value || transitioning.value) return;
-  const f = (e.target as HTMLInputElement).files?.[0];
-  if (!f || !(await allowReplace())) return;
+  if (!(await allowReplace())) return;
   if (f.size > 20 * 1024 * 1024) {
     error.value = "图片请小于20MB";
     return;
@@ -474,10 +493,9 @@ async function upload(e: Event) {
   } finally {
     uploading.value = false;
   }
-  (e.target as HTMLInputElement).value = "";
 }
-async function adoptPixelArt(file: File) {
-  if (transitioning.value || uploading.value || processing.value || generating.value) return;
+async function importAsNewProject(file: File, pixelArt: boolean) {
+  if (transitioning.value || uploading.value || processing.value || generating.value) return false;
   transitioning.value = true;
   try {
     settleTasks();
@@ -488,16 +506,21 @@ async function adoptPixelArt(file: File) {
     const now = Date.now();
     const p: Project = { schemaVersion: 2, source: result.image, normalization: result.normalization?.version,
       paletteId: paletteId.value, points: [], locked: [], step: 1, pitch: pitch.value,
-      selectionMode: 'whole', selectionDirty: false,
+      selectionMode: pixelArt ? 'whole' : 'object', selectionDirty: false,
       tuning: { width: advancedWidth.value, colors: advancedColors.value } };
-    const row = { id: crypto.randomUUID(), name: (projectName.value + ' · 像素画').slice(0, 80), createdAt: now, updatedAt: now, project: p };
+    const name = pixelArt ? projectName.value + ' · 像素画' : file.name.replace(/\.[^.]+$/, '');
+    const row = { id: crypto.randomUUID(), name: name.slice(0, 80), createdAt: now, updatedAt: now, project: p };
     const savedRevision = await saveProject(row, 0);
     await restore(p, { ...row, revision: savedRevision });
-    whole();
-    await makeCandidates();
-  } catch (e) { error.value = (e as Error).message; }
+    if (pixelArt) {
+      whole();
+      await makeCandidates();
+    }
+    return true;
+  } catch (e) { error.value = (e as Error).message; return false; }
   finally { transitioning.value = false; }
 }
+const adoptPixelArt = (file: File) => importAsNewProject(file, true);
 function whole() {
   maskPast.value = [];
   generation.cancel();
@@ -889,7 +912,9 @@ async function makeCandidates() {
   try {
     const t = performance.now(),
       im = image.value!;
-    const out = await generation.run(rgba(), mask.value, im.width, im.height, false, advancedWidth.value, advancedColors.value, undefined, paletteId.value);
+    const codes = await getStockCodes();
+    if (rev !== revision.value) return;
+    const out = await generation.run(rgba(), mask.value, im.width, im.height, false, advancedWidth.value, advancedColors.value, undefined, paletteId.value, codes);
     if (rev !== revision.value) return;
     candidates.value = out;
     timings.value = { ...timings.value, candidatesMs: performance.now() - t };
@@ -957,6 +982,8 @@ async function customCandidate() {
   try {
     const im = image.value,
       t = performance.now();
+    const codes = await getStockCodes();
+    if (rev !== revision.value) return;
     const pixels = rgba();
     const result = await generation.run(
       pixels,
@@ -968,6 +995,7 @@ async function customCandidate() {
       advancedColors.value,
       undefined,
       paletteId.value,
+      codes,
     );
     if (rev !== revision.value) return;
     candidates.value = result;
@@ -988,7 +1016,7 @@ function applyConstraints(withROI: boolean) {
         weight: 3,
       },
       advancedColors.value,
-      activePalette.value.colors,
+      activePalette.value?.colors,
     );
     required.value = c.required;
     roi.value = c.roi;
@@ -1003,6 +1031,8 @@ async function detailCandidate() {
   const rev = revision.value;
   try {
     const im = image.value;
+    const codes = await getStockCodes();
+    if (rev !== revision.value) return;
     const out = await generation.run(
       rgba(),
       mask.value,
@@ -1013,6 +1043,7 @@ async function detailCandidate() {
       advancedColors.value,
       { required: required.value, roi: roi.value, weight: 3 },
       paletteId.value,
+      codes,
     );
     if (rev !== revision.value) return;
     candidates.value = out;
@@ -1234,8 +1265,9 @@ async function newProject() {
     selectionDirty.value = false;
     step.value = 1;
     projectId.value = crypto.randomUUID();
+    cloud.value = undefined;
     projectName.value = "未命名";
-    paletteId.value = DEFAULT_PALETTE_ID;
+    paletteId.value = preferredPalette();
     advancedWidth.value = 64;
     advancedColors.value = 16;
     pitch.value = 2.6;
@@ -1276,12 +1308,48 @@ async function saveAsCopy() {
     const savedRevision = await saveProject(row, 0);
     restoring = true;
     projectId.value = row.id; projectName.value = row.name; createdAt.value = now;
+    cloud.value = undefined;
     storedRevisions.set(row.id, savedRevision); setActiveProject(row.id);
     saveConflict.value = false; error.value = "";
     await nextTick(); restoring = false; saveStatus.value = "已自动保存";
   } catch (e) { error.value = (e as Error).message; }
   finally { restoring = false; transitioning.value = false; }
 }
+async function currentSnapshot(): Promise<SavedProject> {
+  if (!sourceUrl.value && !pattern.value) throw Error("请先导入图片或图纸");
+  await flushProject();
+  return loadProject(projectId.value);
+}
+async function openAccountProject(row: SavedProject) {
+  transitioning.value = true;
+  try {
+    settleTasks();
+    await flushProject();
+    const rows = await listProjects();
+    const cached = row.cloud && rows.find(item => item.cloud?.id === row.cloud?.id &&
+      item.cloud?.revision === row.cloud?.revision && !item.deleted);
+    if (cached) {
+      const latest = await loadProject(cached.id);
+      await restore(latest.project, latest);
+      return;
+    }
+    // Keep older pending edits as their own local project.
+    if (rows.some(item => item.id === row.id)) row.id = crypto.randomUUID();
+    const savedRevision = await saveProject(row, 0);
+    await restore(row.project, { ...row, revision: savedRevision });
+    error.value = "";
+  } finally {
+    transitioning.value = false;
+  }
+}
+async function rememberCloud(id: string, server: NonNullable<SavedProject["cloud"]>) {
+  if (projectId.value !== id) return;
+  cloud.value = server;
+  autosave(false);
+  await flushProject();
+}
+const importExternal = (file: File) => importAsNewProject(file, false);
+defineExpose({ flushProject, currentSnapshot, openAccountProject, rememberCloud, adoptPixelArt, importExternal });
 </script>
 <template>
   <header :inert="initializing || transitioning || showProjects || uploading">
@@ -1291,6 +1359,7 @@ async function saveAsCopy() {
     ><button v-if="saveConflict" @click="saveAsCopy">另存副本</button>
     <span class="project-title">{{ projectName }}</span>
     <span class="runtime">{{ saveStatus }}</span
+    ><span v-if="session.user && cloud" class="cloud-state">{{ cloud.pending ? "待同步到账号" : "账号版本 " + cloud.revision }}</span
     ><label class="upload"
       >打开项目<input
         aria-label="打开项目"
@@ -1304,11 +1373,14 @@ async function saveAsCopy() {
     <div v-if="initializing" class="notice" role="status">正在恢复项目…</div>
     <div v-if="versionMessage" class="notice" role="status">{{ versionMessage }} <button @click="refreshVersion">保存并刷新</button></div>
     <div v-if="!showProjects" class="palette-choice">
-      <label>生成色卡 <select v-model="paletteId" aria-label="生成色卡"><option v-for="p in PALETTES" :key="p.id" :value="p.id" :disabled="!p.available">{{ p.name }} · {{ p.colors.length }} 色</option></select></label>
-      <span>{{ activePalette.info.series }}</span>
+      <label>生成色卡 <select v-model="paletteId" aria-label="生成色卡"><option v-if="!activePalette" :value="paletteId" disabled>历史色卡 · 暂不可用</option><option v-for="p in paletteOptions" :key="p.id" :value="p.id" :disabled="!p.available">{{ p.name }} · {{ p.colors.length }} 色</option></select></label>
+      <span>{{ activePalette?.info.series ?? "请选择可用色卡以重新生成" }}</span>
+      <label v-if="session.user && isDatabasePalette(paletteId)"><input v-model="personalStock" type="checkbox" /> 仅用已有色号</label>
+      <span v-if="personalStock">用量请到材料页核对</span>
     </div>
     <ProjectList
       v-if="showProjects"
+      :storage="storage"
       :current="projectId"
       :before-action="prepareProjectAction"
       @open="switchProject"
@@ -1494,7 +1566,7 @@ async function saveAsCopy() {
                 multiple
                 v-model="requiredDraft"
               >
-                <option v-for="c in activePalette.colors" :value="c.code">
+                <option v-for="c in activePalette?.colors" :value="c.code">
                   {{ c.code }}
                 </option>
               </select></label

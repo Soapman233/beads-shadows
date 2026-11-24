@@ -1,7 +1,7 @@
 import { GRID_WIDTHS, COLOR_LIMITS } from "./config";
 import { validateConstraints, type Constraints } from "./constraints";
 import { stats, type Pattern } from "./engine";
-import { getPalette } from "./palettes/catalog";
+import { getPalette, isDatabasePalette } from "./palettes/catalog";
 export type Project = {
   schemaVersion: 2;
   normalization?: string;
@@ -27,7 +27,7 @@ export function validateProject(raw: any): Project {
     throw Error("不支持的项目版本");
   const p = raw.schemaVersion === 1 ? raw : raw.pattern;
   for (const id of [raw.paletteId, p?.paletteId])
-    if (id !== undefined && (typeof id !== "string" || !getPalette(id)?.available)) fail();
+    if (id !== undefined && (typeof id !== "string" || (!getPalette(id) && !isDatabasePalette(id)))) fail();
   let pattern: Pattern | undefined;
   if (p) {
     if (
@@ -105,7 +105,7 @@ export function validateProject(raw: any): Project {
       pattern.paletteInfo = info;
     }
     if (p.constraints !== undefined)
-      pattern.constraints = validateConstraints(p.constraints, p.colorLimit, getPalette(p.paletteId ?? "legacy-mard220")?.colors);
+      pattern.constraints = validateConstraints(p.constraints, p.colorLimit, constraintColors(p.paletteId, p.constraints));
     if (p.algorithm !== undefined) {
       if (typeof p.algorithm !== "string" || p.algorithm.length > 100) fail();
       pattern.algorithm = p.algorithm;
@@ -179,7 +179,7 @@ export function validateProject(raw: any): Project {
           constraints: validateConstraints(
             raw.constraints,
             raw.tuning?.colors ?? 32,
-            getPalette(raw.paletteId ?? p?.paletteId ?? "legacy-mard220")?.colors,
+            constraintColors(raw.paletteId ?? p?.paletteId, raw.constraints),
           ),
         }
       : {}),
@@ -204,4 +204,15 @@ export function validateProject(raw: any): Project {
 export function parseProject(text: string) {
   if (text.length > 50_000_000) throw Error("项目文件过大");
   return validateProject(JSON.parse(text));
+}
+
+function constraintColors(id: string | undefined, constraints: unknown) {
+  const colors = getPalette(id ?? "legacy-mard220")?.colors;
+  if (colors || !isDatabasePalette(id)) return colors;
+  // Keep constraints in offline snapshots. The full catalogue is required for generation.
+  const required = (constraints as { required?: unknown } | null)?.required;
+  return Array.isArray(required)
+    ? required.filter((c): c is string => typeof c === "string" && c.length > 0 && c.length <= 40)
+      .map(code => ({ code, hex: "#000000" }))
+    : [];
 }

@@ -1,0 +1,18 @@
+@media (max-width: 600px) {
+  .platform-nav {
+    gap: .35rem;
+    padding: .5rem .75rem;
+  }
+  .platform-nav button, .platform-tools button {
+    min-height: 44px;
+  }
+  .platform-panel, .platform-loading {
+    margin: .75rem;
+    padding: .8rem;
+  }
+  .platform-panel table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}

@@ -1,9 +1,11 @@
 """Local segmentation service with bounded image lifetime and shared SAM predictor."""
 from __future__ import annotations
+import asyncio
 import base64
 import io
 import json
 import os
+import secrets
 import sys
 import threading
 import time
@@ -12,7 +14,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +24,20 @@ from image_store import ImageStore, ImageUnavailable
 from normalization import normalize_image, NORMALIZATION_VERSION
 from pydantic import BaseModel, Field
 from ai_images import router as ai_router
+from platform_api.auth import User, optional_user, router as auth_router
+from platform_api.db import enabled as platform_enabled
+from platform_api.projects import router as projects_router
+from platform_api.catalog import router as catalog_router
+from platform_api.inventory import router as inventory_router
+from platform_api.builds import router as builds_router
+from platform_api.publications import router as publications_router
+from platform_api.ai_jobs import router as jobs_router, run_one as run_ai_job
+from platform_api.extensions import router as extensions_router
+from platform_api.social import router as social_router
+from platform_api.notifications import router as notifications_router
+from platform_api.commerce import router as commerce_router
+from platform_api.account_tools import router as account_router
+from platform_api.collab import router as collab_router, watch_room
 
 MAX_BYTES = 20 * 1024 * 1024
 MAX_PIXELS = 20_000_000
@@ -78,7 +94,41 @@ def initialize_model():
 
 initialize_model()
 app = FastAPI(title='拼豆 MVP 分割服务')
-app.include_router(ai_router)
+app.include_router(auth_router)
+app.include_router(projects_router)
+app.include_router(catalog_router)
+app.include_router(inventory_router)
+app.include_router(builds_router)
+app.include_router(publications_router)
+app.include_router(extensions_router)
+app.include_router(social_router)
+app.include_router(notifications_router)
+app.include_router(commerce_router)
+app.include_router(account_router)
+app.include_router(collab_router)
+app.add_api_websocket_route('/api/collab/ws/{room_id}', watch_room)
+if not platform_enabled():
+    app.include_router(ai_router)
+else:
+    app.include_router(jobs_router)
+
+    async def job_loop():
+        while True:
+            try:
+                await asyncio.to_thread(run_ai_job)
+            except Exception as exc:
+                # Error details may hold provider response data. Log only the exception class.
+                print('AI task loop:', type(exc).__name__, file=sys.stderr)
+                await asyncio.sleep(8)
+            await asyncio.sleep(1)
+
+    @app.on_event('startup')
+    async def start_job_loop():
+        app.state.job_loop = asyncio.create_task(job_loop())
+
+    @app.on_event('shutdown')
+    async def stop_job_loop():
+        app.state.job_loop.cancel()
 @app.middleware('http')
 async def production_api_prefix(request, call_next):
     # Same-origin production UI uses /api; Vite strips this prefix in dev.
@@ -86,7 +136,7 @@ async def production_api_prefix(request, call_next):
     if request.scope['path'].startswith('/api/'):
         request.scope['path'] = request.scope['path'][4:]
     response = await call_next(request)
-    if public_path in ('/', '/index.html', '/build-info.json', '/health', '/api/health') or public_path.endswith('.html'):
+    if public_path.startswith('/api/') or public_path in ('/', '/index.html', '/build-info.json', '/health') or public_path.endswith('.html'):
         response.headers['Cache-Control'] = 'no-store'
     return response
 
@@ -124,10 +174,28 @@ def frontend_build_info():
 def health():
     return {'appId': APP_ID, 'backendVersion': BACKEND_VERSION,
             'frontendAvailable': (FRONTEND_DIST / 'index.html').is_file(),
-            'frontendBuild': frontend_build_info(), 'ready': True, 'mode': mode, 'device': device, 'detail': detail, 'normalizationVersion': NORMALIZATION_VERSION, 'imageStore': {'maxImages':store.max_images,'maxBytes':store.max_bytes,'idleTtlSeconds':store.ttl_seconds}}
+            'frontendBuild': frontend_build_info(), 'ready': True, 'mode': mode, 'device': device, 'detail': detail, 'platformEnabled': platform_enabled(), 'normalizationVersion': NORMALIZATION_VERSION, 'imageStore': {'maxImages':store.max_images,'maxBytes':store.max_bytes,'idleTtlSeconds':store.ttl_seconds}}
+
+def image_scope(request: Request, response: Response, user: User | None = Depends(optional_user)):
+    if not platform_enabled():
+        return None
+    if user is not None:
+        return 'user', user.id
+    guest = request.cookies.get('bead_guest', '')
+    if len(guest) != 43 or not guest.isascii() or not guest.replace('-', 'a').replace('_', 'a').isalnum():
+        guest = secrets.token_urlsafe(32)
+        response.set_cookie('bead_guest', guest, httponly=True, samesite='strict',
+                            secure=request.url.scheme == 'https')
+    return 'guest', guest
+
+def cache_key(scope, image_id):
+    return (scope, image_id) if scope is not None else image_id
 
 @app.post('/images')
-async def upload(file: UploadFile = File(...)):
+async def upload_route(file: UploadFile = File(...), scope=Depends(image_scope)):
+    return await upload(file, scope)
+
+async def upload(file: UploadFile, scope=None):
     contents = await file.read(MAX_BYTES + 1)
     if len(contents) > MAX_BYTES:
         raise HTTPException(413, '图片不得超过20MB')
@@ -146,7 +214,7 @@ async def upload(file: UploadFile = File(...)):
     # Same lock protects predictor state, image identity and updates.
     with lock:
         try:
-            store.put(image_id, rgb, alpha, normalization)
+            store.put(cache_key(scope, image_id), rgb, alpha, normalization)
         except ValueError as exc:
             raise HTTPException(413, '图片超出当前图像存储预算，请使用较小图片或提高存储配置') from exc
     return {'imageId': image_id, 'width': rgb.shape[1], 'height': rgb.shape[0], 'image': png_url(rgba), 'normalization':normalization}
@@ -163,9 +231,13 @@ class SegmentRequest(BaseModel):
     revision: int = Field(ge=0)
 
 @app.post('/segment')
-def segment(request: SegmentRequest):
+def segment_route(request: SegmentRequest, scope=Depends(image_scope)):
+    return segment(request, scope)
+
+def segment(request: SegmentRequest, scope=None):
     global encoded_image_id
-    with lock, store.using(request.imageId) as current:
+    key = cache_key(scope, request.imageId)
+    with lock, store.using(key) as current:
         rgb = current['rgb']
         h, w = rgb.shape[:2]
         box = np.array(request.box, dtype=float)
@@ -181,14 +253,14 @@ def segment(request: SegmentRequest):
         try:
             if predictor is not None:
                 with torch.inference_mode():
-                    if encoded_image_id != request.imageId:
+                    if encoded_image_id != key:
                         if device=='cuda': torch.cuda.synchronize()
                         started=time.perf_counter()
                         encoded_image_id = None
                         predictor.set_image(rgb)
                         if device=='cuda': torch.cuda.synchronize()
                         encode_ms=(time.perf_counter()-started)*1000
-                        encoded_image_id=request.imageId
+                        encoded_image_id=key
                     if device=='cuda': torch.cuda.synchronize()
                     started=time.perf_counter()
                     coords=np.array([[p.x,p.y] for p in request.points],dtype=np.float32) if request.points else None
