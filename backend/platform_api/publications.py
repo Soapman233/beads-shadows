@@ -384,7 +384,8 @@ def resolve_report(report_id: str, payload: ReasonInput, admin: User = Depends(r
 @router.get("/admin/overview")
 def admin_overview(days: int = Query(7, ge=1, le=365), admin: User = Depends(require_admin),
                    database: Session = Depends(get_db)):
-    until = utc_now()
+    # Existing MySQL DATETIME columns round writes to the nearest second.
+    until = (utc_now() + timedelta(microseconds=500_000)).replace(microsecond=0)
     since = until - timedelta(days=days)
 
     def count(model, *filters):

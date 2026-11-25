@@ -12,7 +12,7 @@ from sqlalchemy import CheckConstraint, ForeignKey, Index, Numeric, String, Uniq
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from .auth import User, public_user, require_admin, revoke_sessions, utc_now
+from .auth import User, normalized_username, public_user, require_admin, revoke_sessions, utc_now
 from .db import Base, get_db
 
 router = APIRouter(tags=["色卡与管理"])
@@ -286,9 +286,14 @@ def retire_palette(version_id: str, admin: User = Depends(require_admin), databa
 
 @router.get("/admin/users")
 def list_users(limit: int = Query(50, ge=1, le=100), offset: int = Query(0, ge=0),
+               username: str | None = Query(None, max_length=64),
                admin: User = Depends(require_admin), database: Session = Depends(get_db)):
-    users = database.scalars(select(User).order_by(User.created_at.desc(), User.id).offset(offset).limit(limit))
-    return [public_user(user) for user in users]
+    from .account_tools import Closure
+    query = select(User, Closure.user_id).outerjoin(Closure, Closure.user_id == User.id)
+    if username:
+        query = query.where(User.username == normalized_username(username))
+    users = database.execute(query.order_by(User.created_at.desc(), User.id).offset(offset).limit(limit))
+    return [{**public_user(user), "closed": closed_id is not None} for user, closed_id in users]
 
 
 @router.patch("/admin/users/{user_id}")
@@ -301,7 +306,7 @@ def set_user_status(user_id: str, payload: UserPatch, admin: User = Depends(requ
         raise HTTPException(403, "管理员账号须由运维处理")
     if payload.status == "active":
         from .account_tools import Closure
-        if database.get(Closure, user.id):
+        if database.get(Closure, user.id, with_for_update=True):
             raise HTTPException(409, "已主动关闭的账号请按档案恢复流程处理")
     reason = payload.reason.strip()
     if not reason:

@@ -38,7 +38,7 @@ import PixelArtImport from "./PixelArtImport.vue";
 import { DATABASE_PALETTES, PALETTES, DEFAULT_PALETTE_ID, getPalette, isDatabasePalette, loadDatabasePalette } from "./palettes/catalog";
 import { BUILD_INFO } from "./buildInfo";
 import { platformApi, type AccountSession } from "./platformApi";
-const props = defineProps<{ storage: ProjectStorage; session: AccountSession }>();
+const props = defineProps<{ storage: ProjectStorage; session: AccountSession; disconnected: boolean }>();
 const { getActiveProject, setActiveProject, saveProject, loadProject, listProjects, migrateDraft } = props.storage;
 const cloud = ref<SavedProject["cloud"]>();
 function preferredPalette() {
@@ -50,7 +50,9 @@ const activePalette = computed(() => getPalette(paletteId.value));
 const paletteOptions = computed(() => [...DATABASE_PALETTES.values(), ...PALETTES]);
 const personalStock = ref(false);
 async function getStockCodes() {
+  if (!activePalette.value?.available) throw Error("所选色卡不可用，请先选择内置色卡或联网获取此版本");
   if (!personalStock.value || !isDatabasePalette(paletteId.value)) return undefined;
+  if (props.disconnected) throw Error("库存需要联网核对，可取消「仅用已有色号」后生成");
   const result = await api("/inventory/available-colors/" + paletteId.value.slice(3)) as { colors: { code: string }[] };
   return result.colors.map(color => color.code);
 }
@@ -422,6 +424,10 @@ async function refreshVersion() {
   catch (e) { error.value = (e as Error).message; }
 }
 watch(paletteId, () => { personalStock.value = false; if (!restoring) { resetConstraints(); if (step.value === 2) step.value = 1; } });
+function useBuiltInPalette() {
+  paletteId.value = DEFAULT_PALETTE_ID;
+  error.value = "";
+}
 const replacement = ref(false);
 let resolveReplacement: ((v: boolean) => void) | undefined;
 function allowReplace(): Promise<boolean> {
@@ -808,6 +814,10 @@ async function segment() {
     start
   )
     return;
+  if (props.disconnected) {
+    error.value = "主体提取需要联网，可以先用整张图片生成。";
+    return;
+  }
   const rev = revision.value,
     src = sourceUrl.value,
     im = image.value;
@@ -889,7 +899,7 @@ async function segment() {
     drawAll();
   } catch (e) {
     if (current()) {
-      error.value = (e as Error).message;
+      error.value = e instanceof TypeError ? "无法连接主体提取服务，可恢复连接后重试。" : (e as Error).message;
       status.value = "提取失败，可重试或改用整张图片。";
       if (
         [404, 409, 410].includes((e as Error & { status?: number }).status ?? 0)
@@ -1374,8 +1384,12 @@ defineExpose({ flushProject, currentSnapshot, openAccountProject, rememberCloud,
     <div v-if="versionMessage" class="notice" role="status">{{ versionMessage }} <button @click="refreshVersion">保存并刷新</button></div>
     <div v-if="!showProjects" class="palette-choice">
       <label>生成色卡 <select v-model="paletteId" aria-label="生成色卡"><option v-if="!activePalette" :value="paletteId" disabled>历史色卡 · 暂不可用</option><option v-for="p in paletteOptions" :key="p.id" :value="p.id" :disabled="!p.available">{{ p.name }} · {{ p.colors.length }} 色</option></select></label>
-      <span>{{ activePalette?.info.series ?? "请选择可用色卡以重新生成" }}</span>
-      <label v-if="session.user && isDatabasePalette(paletteId)"><input v-model="personalStock" type="checkbox" /> 仅用已有色号</label>
+      <span v-if="activePalette?.available">{{ activePalette.info.series }}<template v-if="isDatabasePalette(paletteId) && (activePalette.cached || disconnected)"> · 本机缓存</template></span>
+      <template v-else>
+        <span role="status">{{ activePalette ? "此色卡已停用" : "此色卡版本未缓存" }}。已保存的图纸仍可编辑、导出。</span>
+        <button @click="useBuiltInPalette">改用内置 MARD</button>
+      </template>
+      <label v-if="session.user && isDatabasePalette(paletteId) && activePalette?.available"><input v-model="personalStock" type="checkbox" :disabled="disconnected && !personalStock" /> 仅用已有色号</label>
       <span v-if="personalStock">用量请到材料页核对</span>
     </div>
     <ProjectList

@@ -7,17 +7,20 @@ import os
 from pathlib import Path
 import secrets
 import smtplib
+import ssl
 from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import DateTime, ForeignKey, String, select, update
+from sqlalchemy import DateTime, ForeignKey, String, func, select, update
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from .auth import (COOKIE, TOKEN, User, block_cross_origin, current_user, normalized_username,
-                   password_hasher, public_user, rate_limit, revoke_sessions, token_digest, utc_now, valid_password)
+from .ai_jobs import cancel_queued_jobs
+from .auth import (COOKIE, User, block_cross_origin, current_user, normalized_username,
+                   password_hasher, public_user, rate_limit, require_admin, revoke_sessions,
+                   token_digest, utc_now, valid_password)
 from .catalog import write_audit
 from .db import Base, get_db
 from .projects import Asset, Project, ProjectVersion, asset_path, project_info, version_info
@@ -65,6 +68,10 @@ class CloseInput(BaseModel):
     acknowledge: bool
 
 
+class RestoreInput(CodeInput):
+    reason: str = Field(min_length=1, max_length=240)
+
+
 def mail_mode():
     if os.getenv("BEAD_DEVELOPMENT_OUTBOX"):
         return "local"
@@ -89,7 +96,8 @@ def notify(address, subject, code):
             with (folder / (str(uuid4()) + ".eml")).open("xb") as target:
                 target.write(message.as_bytes())
             return
-        with smtplib.SMTP_SSL(os.environ["BEAD_SMTP_HOST"], int(os.getenv("BEAD_SMTP_PORT", "465")), timeout=15) as smtp:
+        with smtplib.SMTP_SSL(os.environ["BEAD_SMTP_HOST"], int(os.getenv("BEAD_SMTP_PORT", "465")),
+                              timeout=15, context=ssl.create_default_context()) as smtp:
             if os.getenv("BEAD_SMTP_USER"):
                 smtp.login(os.environ["BEAD_SMTP_USER"], os.environ.get("BEAD_SMTP_PASSWORD", ""))
             smtp.send_message(message)
@@ -136,6 +144,8 @@ def valid_code(code, digest, until):
 @router.post("/recovery/verify")
 def verify_address(body: CodeInput, request: Request, user: User = Depends(current_user), db: Session = Depends(get_db)):
     rate_limit(request, "recovery-verify", 8)
+    if user_lock(db, user.id).status != "active":
+        raise HTTPException(401, "请重新登录")
     row = db.get(Recovery, user.id, with_for_update=True)
     if not row or not valid_code(body.code, row.verify_digest, row.verify_until):
         raise HTTPException(400, "验证码无效或已过期")
@@ -180,6 +190,77 @@ def reset(body: ResetInput, request: Request, db: Session = Depends(get_db)):
     return {"reset": True}
 
 
+def closure_cutoff(now):
+    value = os.getenv("BEAD_ACCOUNT_RECOVERY_DAYS", "").strip()
+    if not value:
+        return None
+    try:
+        days = int(value)
+        if not 1 <= days <= 36500:
+            raise ValueError
+    except ValueError:
+        raise HTTPException(503, "账号恢复期限配置无效") from None
+    return now - timedelta(days=days)
+
+
+@router.post("/closure/request", status_code=202)
+def request_closure_restore(body: UsernameInput, request: Request, db: Session = Depends(get_db)):
+    block_cross_origin(request)
+    rate_limit(request, "closure-request", 5)
+    if not mail_mode():
+        raise HTTPException(503, "邮件服务未配置")
+    cutoff = closure_cutoff(utc_now())
+    owner = db.scalar(select(User).where(User.username == normalized_username(body.username),
+                                        User.status == "frozen", User.role == "user").with_for_update())
+    closure = db.get(Closure, owner.id, with_for_update=True) if owner else None
+    if closure and (cutoff is None or closure.created_at >= cutoff):
+        row = db.get(Recovery, owner.id, with_for_update=True)
+        if row and row.verified_at:
+            code, row.reset_digest, row.reset_until = issue()
+            try:
+                notify(row.email, "豆影关闭账号恢复", code)
+            except HTTPException:
+                db.rollback()
+            else:
+                db.commit()
+    return {"accepted": True}
+
+
+@router.post("/admin/closures/{user_id}/restore")
+def restore_closed_account(user_id: str, body: RestoreInput, request: Request, admin: User = Depends(require_admin),
+                           db: Session = Depends(get_db)):
+    rate_limit(request, "closure-restore", 8)
+    owner = user_lock(db, user_id)
+    closure = db.get(Closure, user_id, with_for_update=True) if owner else None
+    if not closure or owner.status != "frozen" or owner.role != "user":
+        raise HTTPException(404, "未找到已关闭账号")
+    cutoff = closure_cutoff(utc_now())
+    if cutoff is not None and closure.created_at < cutoff:
+        raise HTTPException(409, "账号已超过恢复期限")
+    row = db.get(Recovery, user_id, with_for_update=True)
+    if not row or not row.verified_at or not valid_code(body.code, row.reset_digest, row.reset_until):
+        raise HTTPException(400, "验证码无效或已过期")
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(422, "请填写恢复原因")
+    row.reset_digest = row.reset_until = None
+    owner.status = "active"
+    revoke_sessions(db, user_id)
+    db.delete(closure)
+    write_audit(db, admin.id, "account.restore", user_id, reason)
+    db.commit()
+    return public_user(owner)
+
+
+@router.get("/admin/closure-preview")
+def closure_cleanup_preview(admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    cutoff = closure_cutoff(utc_now())
+    count = 0 if cutoff is None else db.scalar(
+        select(func.count()).select_from(Closure).where(Closure.created_at < cutoff)
+    )
+    return {"cutoffUtc": cutoff.isoformat() + "Z" if cutoff is not None else None, "expiredAccounts": count}
+
+
 @router.get("/export")
 def export_account(user: User = Depends(current_user), db: Session = Depends(get_db)):
     manifest = {"account": public_user(user), "projects": [], "contents": "projects, versions, private PNG assets"}
@@ -210,12 +291,19 @@ def close_account(body: CloseInput, request: Request, response: Response,
     if not body.acknowledge or user.role == "admin":
         raise HTTPException(400, "请确认关闭普通用户账号")
     locked = user_lock(db, user.id)
+    if locked.status != "active":
+        raise HTTPException(401, "请重新登录")
     if not valid_password(locked.password_digest, body.password):
         raise HTTPException(400, "当前密码无效")
     if not db.get(Closure, user.id):
         db.add(Closure(user_id=user.id))
+    recovery = db.get(Recovery, user.id, with_for_update=True)
+    if recovery:
+        recovery.reset_digest = recovery.reset_until = None
+        recovery.verify_digest = recovery.verify_until = None
     locked.status = "frozen"
     revoke_sessions(db, user.id)
+    cancel_queued_jobs(db, user.id)
     db.execute(update(Publication).where(Publication.author_id == user.id, Publication.status.in_(("published", "pending")))
                .values(status="withdrawn"))
     write_audit(db, user.id, "account.close", user.id, "本人确认关闭")

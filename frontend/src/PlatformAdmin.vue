@@ -7,7 +7,7 @@ import type { Pattern } from "./engine";
 
 type Version = { id: string; version: string; status: string };
 type Palette = { id: string; brand: string; series: string; sizeMm: number; versions: Version[] };
-type User = { id: string; username: string; nickname: string; role: string; status: string };
+type User = { id: string; username: string; nickname: string; role: string; status: string; closed: boolean };
 type Audit = { id: string; action: string; summary: string; createdAt: string };
 const props = defineProps<{ session: AccountSession }>();
 const call = <T,>(path: string, options?: RequestInit) => platformApi<T>("/admin" + path, options, props.session);
@@ -16,11 +16,17 @@ const error = ref(""), busy = ref(false), tab = ref("palette"), selected = ref("
 const brand = ref(""), series = ref(""), sizeMm = ref(2.6), version = ref(""), source = ref(""),
   licenseStatus = ref("unknown"), csv = ref(""), preview = ref(""), reuseCodes = ref("");
 const reason = ref("");
+const userSearch = ref("");
+const restoreTarget = ref<User>();
+const restoreCode = ref("");
+const closurePreview = ref<{ cutoffUtc: string | null; expiredAccounts: number }>();
 const grantCount = ref(5);
 const queue = ref<{ id: string; title: string; author: string; pattern: Pattern }[]>([]);
 const reports = ref<{ id: string; title: string; reason: string }[]>([]);
 const moderationStatus = ref("pending");
-const overview = ref<{ activeAccounts: number; savedProjects: number; pendingPublications: number; pendingReports: number; recentPublished: number; recentInventoryMovements: number }>();
+const overview = ref<{ since: string; until: string; activeAccounts: number; savedProjects: number;
+  pendingPublications: number; pendingReports: number; newAccounts: number; recentPublished: number;
+  recentInventoryMovements: number }>();
 const socialReports = ref<{ id: string; kind: string; text: string | null; reason: string }[]>([]);
 const unknownJobs = ref<{ id: string; provider: string; error: string; createdAt: string }[]>([]);
 async function work(action: () => Promise<void>) {
@@ -49,10 +55,29 @@ async function publish(id: string, action: "publish" | "retire") {
   await call("/palette-versions/" + id + "/" + action, { method: "POST" });
   await Promise.all([refresh(), loadPublishedPalettes()]);
 }
-async function listUsers() { users.value = await call<User[]>("/users"); }
+async function listUsers() {
+  const username = userSearch.value.trim();
+  users.value = await call<User[]>("/users" + (username ? "?" + new URLSearchParams({ username }) : ""));
+}
+async function searchUsers() {
+  restoreTarget.value = undefined;
+  restoreCode.value = "";
+  await listUsers();
+}
 async function setStatus(user: User) {
   await call("/users/" + user.id, jsonRequest("PATCH", { status: user.status === "active" ? "frozen" : "active", reason: reason.value }));
   await listUsers();
+}
+async function restoreClosedAccount(user: User) {
+  await platformApi("/account/admin/closures/" + user.id + "/restore",
+    jsonRequest("POST", { code: restoreCode.value.trim(), reason: reason.value }), props.session);
+  restoreCode.value = "";
+  restoreTarget.value = undefined;
+  await listUsers();
+}
+async function loadClosurePreview() {
+  closurePreview.value = await platformApi<NonNullable<typeof closurePreview.value>>(
+    "/account/admin/closure-preview", {}, props.session);
 }
 async function showAudit() { audit.value = await call<Audit[]>("/audit"); }
 async function loadQueue() {
@@ -132,13 +157,29 @@ async function reconcile(id: string, billed: boolean) {
       </div>
     </div>
     <div v-if="tab === 'user'">
-      <label>操作理由 <input v-model="reason" /></label>
+      <form class="platform-tools" @submit.prevent="work(searchUsers)">
+        <label>账号 <input v-model="userSearch" maxlength="64" /></label>
+        <button :disabled="busy">查找账号</button>
+      </form>
+      <label>操作理由 <input v-model="reason" maxlength="180" /></label>
       <label>发放次数 <input v-model.number="grantCount" type="number" min="1" max="1000" /></label>
+      <button :disabled="busy" @click="work(loadClosurePreview)">查看已超期关闭账号</button>
+      <p v-if="closurePreview" role="status">{{ closurePreview.cutoffUtc
+        ? `超期关闭账号 ${closurePreview.expiredAccounts} 个`
+        : "恢复期限尚未设置" }}</p>
       <div v-for="user in users" :key="user.id" class="platform-tools">
-        <span>{{ user.nickname }} · {{ user.username }} · {{ user.status === "active" ? "正常" : "冻结" }}</span>
-        <button v-if="user.role === 'user'" :disabled="busy || !reason.trim()" @click="work(() => setStatus(user))">{{ user.status === 'active' ? "冻结" : "解冻" }}</button>
-        <button :disabled="busy || !Number.isInteger(grantCount) || grantCount < 1 || grantCount > 1000" @click="work(() => grantQuota(user))">发放重绘额度</button>
+        <span>{{ user.nickname }} · {{ user.username }} · {{ user.closed ? "已关闭" : user.status === "active" ? "正常" : "冻结" }}</span>
+        <button v-if="user.closed" :disabled="busy" @click="restoreTarget = user; restoreCode = ''">恢复账号</button>
+        <button v-else-if="user.role === 'user'" :disabled="busy || !reason.trim()" @click="work(() => setStatus(user))">{{ user.status === 'active' ? "冻结" : "解冻" }}</button>
+        <button v-if="!user.closed" :disabled="busy || !Number.isInteger(grantCount) || grantCount < 1 || grantCount > 1000" @click="work(() => grantQuota(user))">发放重绘额度</button>
       </div>
+      <form v-if="restoreTarget" class="platform-tools" @submit.prevent="work(() => restoreClosedAccount(restoreTarget!))">
+        <label>{{ restoreTarget.username }} 的邮箱验证码
+          <input v-model="restoreCode" type="password" autocomplete="off" required minlength="43" maxlength="43" />
+        </label>
+        <button :disabled="busy || !reason.trim()">确认恢复</button>
+        <button type="button" :disabled="busy" @click="restoreTarget = undefined; restoreCode = ''">取消</button>
+      </form>
     </div>
     <template v-if="tab === 'audit'">
       <div v-for="entry in audit" :key="entry.id" class="platform-tools">{{ entry.createdAt }} · {{ entry.action }} · {{ entry.summary }}</div>
@@ -165,14 +206,18 @@ async function reconcile(id: string, billed: boolean) {
         <button :disabled="busy || !reason.trim()" @click="work(() => resolveReport(row.id))">标记已处理</button>
       </div>
     </template>
-    <dl v-if="tab === 'overview' && overview">
-      <dt>正常账号</dt><dd>{{ overview.activeAccounts }}</dd>
-      <dt>已保存项目</dt><dd>{{ overview.savedProjects }}</dd>
-      <dt>待审核作品</dt><dd>{{ overview.pendingPublications }}</dd>
-      <dt>待处理举报</dt><dd>{{ overview.pendingReports }}</dd>
-      <dt>近 7 天发布</dt><dd>{{ overview.recentPublished }}</dd>
-      <dt>近 7 天库存流水</dt><dd>{{ overview.recentInventoryMovements }}</dd>
-    </dl>
+    <template v-if="tab === 'overview' && overview">
+      <p>近 7 天（UTC）{{ overview.since }} 至 {{ overview.until }}</p>
+      <dl>
+        <dt>正常账号</dt><dd>{{ overview.activeAccounts }}</dd>
+        <dt>未回收项目</dt><dd>{{ overview.savedProjects }}</dd>
+        <dt>待审核作品</dt><dd>{{ overview.pendingPublications }}</dd>
+        <dt>待处理作品举报</dt><dd>{{ overview.pendingReports }}</dd>
+        <dt>近 7 天新增账号</dt><dd>{{ overview.newAccounts }}</dd>
+        <dt>近 7 天发布且仍公开</dt><dd>{{ overview.recentPublished }}</dd>
+        <dt>近 7 天库存流水</dt><dd>{{ overview.recentInventoryMovements }}</dd>
+      </dl>
+    </template>
     <template v-if="tab === 'social' || tab === 'ai'">
       <label>核对记录 <input v-model="reason" maxlength="180" /></label>
     </template>

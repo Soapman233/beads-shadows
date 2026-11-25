@@ -94,10 +94,13 @@ def event(db, user_id, action, quantity, request_id, job_id=None):
                       action=action, quantity=quantity))
 
 
-def quota_row(db, user_id):
-    owner = db.scalar(select(User).where(User.id == user_id).with_for_update())
+def quota_row(db, user_id, *, require_active=False):
+    owner = db.scalar(select(User).where(User.id == user_id).with_for_update()
+                      .execution_options(populate_existing=True))
     if not owner:
         raise HTTPException(404, '账号不存在')
+    if require_active and owner.status != 'active':
+        raise HTTPException(401, '请重新登录')
     quota = db.scalar(select(AIQuota).where(AIQuota.user_id == user_id).with_for_update())
     if quota is None:
         quota = AIQuota(user_id=user_id, remaining=0, reserved=0, used=0)
@@ -140,7 +143,7 @@ def create_job(body: JobRequest, user: User = Depends(current_user), db: Session
     selected = provider()
     if not selected:
         raise HTTPException(503, '尚未启用图片重绘服务')
-    quota = quota_row(db, user.id)
+    quota = quota_row(db, user.id, require_active=True)
     prior = db.scalar(select(AIJob).where(AIJob.user_id == user.id, AIJob.request_id == body.requestId).with_for_update())
     if prior:
         if prior.input_id != body.assetId or prior.prompt != body.prompt or prior.provider != body.provider:
@@ -185,6 +188,16 @@ def settle(db, job, quota, status, error=None):
         quota.remaining += 1
         action = 'release'
     event(db, job.user_id, action, 1, job.id + ':' + action, job.id)
+
+
+def cancel_queued_jobs(db, user_id):
+    """Called with the owner row locked by account closure."""
+    quota = db.get(AIQuota, user_id, with_for_update=True)
+    if quota is None:
+        return
+    jobs = db.scalars(select(AIJob).where(AIJob.user_id == user_id, AIJob.status == 'queued').with_for_update())
+    for job in jobs:
+        settle(db, job, quota, 'cancelled', '账号已关闭')
 
 
 @router.get('/admin/unknown')

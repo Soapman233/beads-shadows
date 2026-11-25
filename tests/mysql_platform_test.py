@@ -5,7 +5,7 @@ Each run creates synthetic users for isolation. Never run against user data.
 """
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from datetime import timedelta
+from datetime import datetime, timedelta
 import base64
 from email.parser import BytesParser
 from email.policy import default as email_policy
@@ -89,8 +89,8 @@ class Client:
         return data
 
 
-def png(color, bounds=(16, 16, 47, 47)):
-    image = Image.new("RGBA", (64, 64), "white")
+def png(color, bounds=(16, 16, 47, 47), size=(64, 64)):
+    image = Image.new("RGBA", size, "white")
     ImageDraw.Draw(image).rectangle(bounds, fill=color)
     output = io.BytesIO()
     image.save(output, format="PNG")
@@ -110,8 +110,10 @@ class MySQLPlatformTest(unittest.TestCase):
         runtime.mkdir(parents=True, exist_ok=False)
         self.outbox = runtime / "outbox"
         self.origin = f"http://127.0.0.1:{port}"
-        env = {**os.environ, "BEAD_DISABLE_SAM": "1", "BEAD_AI_ENABLED": "0",
+        real_sam = os.environ.get("BEAD_TEST_REAL_SAM") == "1"
+        env = {**os.environ, "BEAD_DISABLE_SAM": "0" if real_sam else "1", "BEAD_AI_ENABLED": "0",
                "BEAD_AI_SIMULATION": "1", "BEAD_AI_PLATFORM_LIVE": "0", "BEAD_MOCK_PAYMENTS": "1",
+               "BEAD_ACCOUNT_RECOVERY_DAYS": "30",
                "BEAD_DEVELOPMENT_OUTBOX": str(self.outbox),
                "BEAD_ASSET_DIR": str(runtime / "assets"), "BEAD_WEB_ORIGIN": self.origin}
         with (runtime / "server.log").open("wb") as log:
@@ -122,7 +124,7 @@ class MySQLPlatformTest(unittest.TestCase):
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         self.addCleanup(self.stop_server)
-        for _ in range(40):
+        for _ in range(300 if real_sam else 40):
             if self.server.poll() is not None:
                 break
             try:
@@ -293,6 +295,30 @@ class MySQLPlatformTest(unittest.TestCase):
 
     def test_workshop_weighted_progress_and_moderated_publications(self):
         admin = self.create_admin()
+        overview_path = "/admin/overview?days=1"
+        self.bob.request("GET", overview_path, status=403)
+        baseline = admin.request("GET", overview_path)
+        self.assertEqual(datetime.fromisoformat(baseline["until"]) - datetime.fromisoformat(baseline["since"]), timedelta(days=1))
+        recent_user = Client(self.origin).register(f"overview-{uuid4().hex[:10]}", secrets.token_urlsafe(20))
+        accounts = admin.request("GET", overview_path)
+        for key in ("activeAccounts", "newAccounts"):
+            self.assertEqual(accounts[key], baseline[key] + 1)
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+        try:
+            from platform_api.auth import User
+            from platform_api.db import session_factory
+        finally:
+            sys.path.pop(0)
+        with session_factory()() as database:
+            account = database.get(User, recent_user["id"])
+            original_created_at = account.created_at
+            account.created_at -= timedelta(days=1, minutes=2)
+            database.commit()
+            outside = admin.request("GET", overview_path)
+            self.assertEqual(outside["newAccounts"], baseline["newAccounts"])
+            self.assertEqual(outside["activeAccounts"], accounts["activeAccounts"])
+            account.created_at = original_created_at
+            database.commit()
         series = admin.request("POST", "/admin/palettes", {
             "brand": f"Workshop {uuid4().hex[:8]}", "series": "Standard", "sizeMm": 5,
         }, 201)["id"]
@@ -352,6 +378,10 @@ class MySQLPlatformTest(unittest.TestCase):
                        "allowDownload": False, "allowRemix": False, "rightsConfirmed": True}
         self.alice.request("POST", "/publications", {**publication, "rightsConfirmed": False}, 422)
         submitted = self.alice.request("POST", "/publications", publication, 201)
+        pending = admin.request("GET", overview_path)
+        self.assertEqual(pending["savedProjects"], baseline["savedProjects"] + 1)
+        self.assertEqual(pending["recentInventoryMovements"], baseline["recentInventoryMovements"] + 3)
+        self.assertEqual(pending["pendingPublications"], baseline["pendingPublications"] + 1)
         pub_path = f"/publications/{submitted['id']}"
         moderation_path = f"/admin{pub_path}/moderate"
         anon = Client(self.origin)
@@ -359,6 +389,9 @@ class MySQLPlatformTest(unittest.TestCase):
             anon.request("GET", pub_path + subpath, status=404)
         self.bob.request("POST", moderation_path, {"action": "approve", "reason": "review"}, 403)
         admin.request("POST", moderation_path, {"action": "approve", "reason": "合成测试图纸"})
+        published = admin.request("GET", overview_path)
+        self.assertEqual(published["pendingPublications"], baseline["pendingPublications"])
+        self.assertEqual(published["recentPublished"], baseline["recentPublished"] + 1)
         self.alice.request("PATCH", project_path, {
             "expected_revision": 1,
             **body,
@@ -385,8 +418,13 @@ class MySQLPlatformTest(unittest.TestCase):
         directory = anon.request("GET", "/publications?category=object&minWidth=48&maxWidth=48&sort=popular")
         self.assertIn(submitted["id"], [item["id"] for item in directory["items"]])
         report = self.bob.request("POST", f"{pub_path}/report", {"reason": "合成举报测试"}, 201)
+        replay = self.bob.request("POST", f"{pub_path}/report", {"reason": "合成举报测试"}, 201)
+        self.assertEqual(report["id"], replay["id"])
+        self.assertEqual(admin.request("GET", overview_path)["pendingReports"], baseline["pendingReports"] + 1)
         admin.request("POST", f"/admin/publication-reports/{report['id']}/resolve", {"reason": "受理测试"})
+        self.assertEqual(admin.request("GET", overview_path)["pendingReports"], baseline["pendingReports"])
         admin.request("POST", moderation_path, {"action": "takedown", "reason": "完成下架测试"})
+        self.assertEqual(admin.request("GET", overview_path)["recentPublished"], baseline["recentPublished"])
         for subpath in ("", "/preview", "/download"):
             anon.request("GET", pub_path + subpath, status=404)
         self.assertEqual(self.bob.request("GET", "/favorites")["items"], [])
@@ -678,6 +716,23 @@ class MySQLPlatformTest(unittest.TestCase):
             self.assertEqual(archive.namelist(), ["projects.json"])
             self.assertEqual(json.loads(archive.read("projects.json"))["projects"], [])
         command = {"password": new_password, "acknowledge": True}
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
+        try:
+            from platform_api.account_tools import Closure
+            from platform_api.ai_jobs import AIJob, AIQuota
+            from platform_api.db import session_factory
+            from platform_api.projects import Asset, Project
+        finally:
+            sys.path.pop(0)
+        queued_job_id = str(uuid4())
+        with session_factory()() as database:
+            owner_id = self.alice_user["id"]
+            database.add(AIQuota(user_id=owner_id, remaining=0, reserved=1, used=0))
+            database.add(AIJob(id=queued_job_id, user_id=owner_id, input_id=asset, provider="bailian",
+                               prompt="合成测试", request_id=uuid4().hex, status="queued"))
+            database.commit()
+        stale_session = Client(self.origin)
+        stale_session.login(self.username, new_password)
         self.alice.request("POST", "/account/close", {**command, "acknowledge": False}, 400)
         self.alice.request("POST", "/account/close", command, 204)
         self.alice.request("GET", "/account/export", status=401)
@@ -689,15 +744,45 @@ class MySQLPlatformTest(unittest.TestCase):
         self.assertEqual(anonymous.request("GET", f"/publications?{lookup}")["items"], [])
         # Self-closure is not an ordinary administrative freeze.
         admin.request("PATCH", f"/admin/users/{self.alice_user['id']}", {"status": "active", "reason": "恢复演练"}, 409)
-        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-        try:
-            from platform_api.db import session_factory
-            from platform_api.projects import Asset, Project
-        finally:
-            sys.path.pop(0)
         with session_factory()() as database:
             self.assertEqual(database.get(Project, project["id"]).owner_id, self.alice_user["id"])
             self.assertEqual(database.get(Asset, asset).owner_id, self.alice_user["id"])
+            self.assertEqual(database.get(AIJob, queued_job_id).status, "cancelled")
+            self.assertEqual(database.get(AIQuota, owner_id).reserved, 0)
+        restore_path = f"/account/admin/closures/{self.alice_user['id']}/restore"
+        preview = "/account/admin/closure-preview"
+        self.bob.request("GET", preview, status=403)
+        before = admin.request("GET", preview)
+        self.assertTrue(before["cutoffUtc"])
+        with session_factory()() as database:
+            closure = database.get(Closure, owner_id)
+            closed_at = closure.created_at
+            closure.created_at -= timedelta(days=31)
+            database.commit()
+        self.assertEqual(admin.request("GET", preview)["expiredAccounts"], before["expiredAccounts"] + 1)
+        admin.request("POST", restore_path, {"code": reset["code"], "reason": "超期演练"}, 409)
+        with session_factory()() as database:
+            self.assertEqual(database.get(Project, project["id"]).owner_id, owner_id)
+            database.get(Closure, owner_id).created_at = closed_at
+            database.commit()
+        restore = {"code": reset["code"], "reason": "合成账号恢复演练"}
+        admin.request("POST", restore_path, restore, 400)
+        for username in (self.username, "unknown-mysql-fixture"):
+            self.assertEqual(anonymous.request("POST", "/account/closure/request", {"username": username}, 202),
+                             {"accepted": True})
+        code = read_code("豆影关闭账号恢复")
+        restore["code"] = code
+        anonymous.request("POST", "/account/recovery/reset", {**reset, "code": code}, 400)
+        self.bob.request("POST", restore_path, restore, 403)
+        admin.request("POST", restore_path, restore)
+        admin.request("POST", restore_path, restore, 404)
+        stale_session.request("GET", "/projects", status=401)
+        anonymous.request("GET", publication_path, status=404)
+        self.alice.login(self.username, new_password)
+        self.assertEqual(self.alice.request("GET", f"/projects/{project['id']}")["id"], project["id"])
+        self.bob.request("GET", f"/assets/{asset}/content", status=404)
+        self.assertTrue(any(entry["action"] == "account.restore" and entry["targetId"] == self.alice_user["id"]
+                            for entry in admin.request("GET", "/admin/audit")))
 
     def test_structure_lease_expires_and_preserves_previous_room(self):
         saved = self.save_fixture()
@@ -825,7 +910,7 @@ class MySQLPlatformTest(unittest.TestCase):
         anonymous.request("GET", "/projects", status=401)
         participant_b = self.bob.request("GET", "/auth/me")["user"]["id"]
         uploaded_a = self.alice.request("POST", "/images", multipart=(png("red"), None))
-        uploaded_b = self.bob.request("POST", "/images", multipart=(png("blue", (24, 24, 39, 39)), None))
+        uploaded_b = self.bob.request("POST", "/images", multipart=(png("blue", (24, 24, 39, 39), (56, 80)), None))
 
         def segment_body(image):
             return {"imageId": image["imageId"], "box": [8, 8, 56, 56],
@@ -838,10 +923,14 @@ class MySQLPlatformTest(unittest.TestCase):
             (self.alice, uploaded_a, 255), (self.bob, uploaded_b, 0), (self.alice, uploaded_a, 255),
         ]:
             result = actor.request("POST", "/segment", segment_body(image))
+            if os.environ.get("BEAD_TEST_REAL_SAM") == "1":
+                self.assertEqual((result["mode"], result["device"]), ("SAM 2.1 Tiny", "cpu"))
+                self.assertGreater(result["timings"]["encodeMs"], 0)
             self.assertEqual(result["imageId"], image["imageId"])
             prefix, encoded = result["mask"].split(",", 1)
             self.assertEqual(prefix, "data:image/png;base64")
             with Image.open(io.BytesIO(base64.b64decode(encoded))) as mask:
+                self.assertEqual(mask.size, (image["width"], image["height"]))
                 self.assertEqual(mask.getpixel((32, 32)), 255)
                 self.assertEqual(mask.getpixel((18, 18)), edge)
                 observed_masks.append(mask.tobytes())

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {PALETTES,getPalette} from '../frontend/src/palettes/catalog';
+import {PALETTES,getPalette,restorePublicPaletteCache} from '../frontend/src/palettes/catalog';
 import {generateConstrainedPattern} from '../frontend/src/constraints';
-import {hexRgb,getPatternPalette,planColorReplace,stats} from '../frontend/src/engine';
+import {generatePattern,hexRgb,getPatternPalette,planColorReplace,stats} from '../frontend/src/engine';
 import {parseProject} from '../frontend/src/project';
 
 test('available reference palettes preserve brand snapshots through generation, restore and replacement',()=>{
@@ -41,4 +41,35 @@ test('available reference palettes preserve brand snapshots through generation, 
   if(foreignCode)assert.throws(()=>planColorReplace(saved.pattern!,used[0],foreignCode.code));
  }
  assert.equal(getPalette('unknown-brand'),undefined);
+});
+
+test('cold start restores a public database palette and ignores invalid cached colors', () => {
+  const version = {
+    id: '00000000-0000-4000-8000-000000000001',
+    brand: 'Fixture', series: 'Offline', sizeMm: 2.6, version: 'v1',
+    source: 'https://example.test/fixture', licenseStatus: 'internal', status: 'published',
+    colors: [{ code: 'B1', hex: '#112233' }, { code: 'R1', hex: '#FF1100' }],
+  };
+  const bad = { ...version, id: '00000000-0000-4000-8000-000000000002',
+    colors: [{ code: 'B1', hex: 'invalid' }] };
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem: () => JSON.stringify([version, bad]) },
+  });
+  try {
+    assert.equal(getPalette('db:' + version.id), undefined);
+    restorePublicPaletteCache();
+    const cached = getPalette('db:' + version.id);
+    assert.ok(cached?.cached && cached.available);
+    assert.deepEqual(cached.colors, version.colors);
+    assert.equal(getPalette('db:' + bad.id), undefined);
+    const rgba = new Uint8ClampedArray(32 * 32 * 4);
+    for (let offset = 0; offset < rgba.length; offset += 4) rgba.set([17, 34, 51, 255], offset);
+    const grid = generatePattern(rgba, 32, 32, new Uint8Array(1024).fill(1), 32, 8, cached.colors);
+    assert.equal(stats(grid.cells).counts.B1, 1024);
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original);
+    else Reflect.deleteProperty(globalThis, 'localStorage');
+  }
 });

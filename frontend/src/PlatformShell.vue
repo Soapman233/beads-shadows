@@ -12,7 +12,7 @@ import MaterialShop from "./MaterialShop.vue";
 import CollaborationPanel from "./CollaborationPanel.vue";
 import { jsonRequest, platformApi, type AccountSession } from "./platformApi";
 import { createProjectStorage } from "./storage";
-import { loadPublishedPalettes } from "./palettes/catalog";
+import { loadPublishedPalettes, restorePublicPaletteCache } from "./palettes/catalog";
 import { validateProject } from "./project";
 
 const guest: AccountSession = { user: null, csrfToken: null };
@@ -22,6 +22,7 @@ const accountId = computed(() => session.value.user?.id);
 const storage = computed(() => createProjectStorage(accountId.value));
 const screen = ref<"editor" | "cloud" | "login" | "profile" | "inventory" | "admin" | "library" | "workshop" | "ai" | "inbox" | "shop" | "collab">("editor");
 const available = ref(false), initialized = ref(false), busy = ref(false), message = ref("");
+const disconnected = ref(false), connecting = ref(false), recoverableId = ref<string>();
 const username = ref(""), password = ref(""), nickname = ref(""), preferred = ref("");
 const oldPassword = ref(""), newPassword = ref(""), registering = ref(false);
 const email = ref(""), recoveryCode = ref(""), closePassword = ref(""), closeConfirmed = ref(false);
@@ -69,30 +70,65 @@ async function acceptImport() {
   screen.value = "editor";
 }
 
-onMounted(async () => {
+restorePublicPaletteCache();
+const connectionTimeout = () => ({ signal: AbortSignal.timeout(4000) });
+
+onMounted(() => {
   window.addEventListener("message", extensionMessage);
-  window.addEventListener("focus", checkSession);
-  try {
-    available.value = !!(await platformApi<{ platformEnabled: boolean }>("/health")).platformEnabled;
-    if (available.value) {
-      session.value = await platformApi<AccountSession>("/auth/me");
-      await loadPublishedPalettes().catch(() => {});
-      const mail = await platformApi<{ mailEnabled: boolean }>("/account/recovery/status").catch(() => ({mailEnabled:false}));
-      mailEnabled.value = mail.mailEnabled;
-    }
-  } catch { available.value = false; }
-  finally { initialized.value = true; }
+  window.addEventListener("focus", onFocus);
+  window.addEventListener("online", reconnect);
+  window.addEventListener("offline", markDisconnected);
+  void connect(true);
 });
 onBeforeUnmount(() => {
   window.removeEventListener("message", extensionMessage);
-  window.removeEventListener("focus", checkSession);
+  window.removeEventListener("focus", onFocus);
+  window.removeEventListener("online", reconnect);
+  window.removeEventListener("offline", markDisconnected);
 });
+function reconnect() { void connect(); }
+function markDisconnected() { disconnected.value = true; recoverableId.value = undefined; }
+function onFocus() {
+  if (disconnected.value && navigator.onLine) reconnect();
+  else if (!connecting.value && !busy.value) {
+    void checkSession().then(verified => { if (!verified) markDisconnected(); });
+  }
+}
+async function connect(initial = false) {
+  if (connecting.value) return;
+  connecting.value = true;
+  try {
+    if (!navigator.onLine) { markDisconnected(); return; }
+    available.value = !!(await platformApi<{ platformEnabled: boolean }>("/health", connectionTimeout())).platformEnabled;
+    if (available.value) {
+      const original = session.value;
+      if (original.user) {
+        if (!(await checkSession())) { markDisconnected(); return; }
+      } else {
+        const restored = await platformApi<AccountSession>("/auth/me", connectionTimeout());
+        if (session.value === original) {
+          if (initial) session.value = restored;
+          else recoverableId.value = restored.user?.id;
+        }
+      }
+      void loadPublishedPalettes().catch(() => {});
+      void platformApi<{ mailEnabled: boolean }>("/account/recovery/status", connectionTimeout())
+        .then(mail => { mailEnabled.value = mail.mailEnabled; }).catch(() => {});
+    }
+    disconnected.value = !navigator.onLine;
+  } catch { markDisconnected(); }
+  finally { connecting.value = false; initialized.value = true; }
+}
 async function checkSession() {
   const original = session.value;
-  if (!original.user || busy.value) return;
-  try { await platformApi<AccountSession>("/auth/me", {}, original); }
+  if (!original.user) return true;
+  try {
+    await platformApi<AccountSession>("/auth/me", connectionTimeout(), original);
+    return true;
+  }
   catch (e) {
-    if (session.value !== original || ![401, 409].includes((e as { status?: number }).status ?? 0)) return;
+    if (session.value !== original) return true;
+    if (busy.value || ![401, 409].includes((e as { status?: number }).status ?? 0)) return false;
     await act(async () => {
       let saved = true;
       try { await editor.value?.flushProject(); }
@@ -101,6 +137,24 @@ async function checkSession() {
       screen.value = "login";
       message.value = saved ? "会话已变更，请重新登录" : "会话已变更。最后一次草稿保存失败，请重新登录原账号检查此前版本";
     });
+    return true;
+  }
+}
+async function restoreWorkspace() {
+  const id = recoverableId.value;
+  if (!id) return;
+  await editor.value?.flushProject();
+  try {
+    const restored = await platformApi<AccountSession>("/auth/me",
+      { ...connectionTimeout(), headers: { "X-Bead-Account": id } });
+    if (restored.user?.id !== id) throw Error("会话已变更，请登录");
+    session.value = restored;
+    recoverableId.value = undefined;
+    screen.value = "editor";
+  } catch (e) {
+    recoverableId.value = undefined;
+    screen.value = "login";
+    throw e;
   }
 }
 async function act(action: () => Promise<void>) {
@@ -114,6 +168,7 @@ async function authenticate() {
   await editor.value?.flushProject();
   session.value = await platformApi<AccountSession>(registering.value ? "/auth/register" : "/auth/login",
     jsonRequest("POST", { username: username.value, password: password.value, ...(registering.value ? { nickname: nickname.value } : {}) }));
+  recoverableId.value = undefined;
   password.value = "";
   screen.value = "editor";
 }
@@ -145,6 +200,10 @@ async function changePassword() {
 async function sendRecovery() {
   await platformApi("/account/recovery/request", jsonRequest("POST", { username: username.value }));
   message.value = "若该账号已绑定验证邮箱，将收到验证码";
+}
+async function requestAccountRestoration() {
+  await platformApi("/account/closure/request", jsonRequest("POST", { username: username.value }));
+  message.value = "如账号符合恢复条件，验证码将发至已验证邮箱。请联系管理员恢复。";
 }
 async function resetPassword() {
   await platformApi("/account/recovery/reset", jsonRequest("POST",
@@ -197,6 +256,10 @@ async function openTemplate() {
 <template>
   <p v-if="!initialized" class="platform-loading" role="status">正在打开工作区…</p>
   <template v-else>
+    <div v-if="disconnected" class="platform-loading platform-tools" role="status">
+      <span>{{ session.user ? "连接中断，可继续本机编辑，联网后手动同步" : "连接中断，当前是本机游客工作区" }}</span>
+      <button :disabled="connecting || busy" @click="reconnect">重试连接</button>
+    </div>
     <section v-if="incoming" class="platform-panel panel" aria-label="扩展导入确认">
       <div class="platform-tools">
         <span>来自 {{ incoming.sourceOrigin }} 的图片 · {{ incoming.file.name }}</span>
@@ -220,11 +283,14 @@ async function openTemplate() {
         <button :disabled="busy" @click="profile">{{ session.user.nickname }}</button>
         <button :disabled="busy" @click="act(logout)">退出</button>
       </template>
-      <button v-else :disabled="busy" @click="screen = 'login'">登录</button>
+      <template v-else>
+        <button v-if="recoverableId" :disabled="busy" @click="act(restoreWorkspace)">恢复账号工作区</button>
+        <button :disabled="busy" @click="screen = 'login'">登录</button>
+      </template>
     </nav>
     <p v-if="message && screen === 'editor'" class="platform-loading" role="status">{{ message }}</p>
     <div v-show="screen === 'editor'">
-      <App :key="session.user?.id ?? 'guest'" ref="editor" :storage="storage" :session="session" />
+      <App :key="session.user?.id ?? 'guest'" ref="editor" :storage="storage" :session="session" :disconnected="disconnected" />
     </div>
     <section v-if="screen === 'login'" class="platform-panel panel">
       <h2>{{ registering ? "注册" : "登录" }}</h2>
@@ -237,6 +303,7 @@ async function openTemplate() {
           <button class="primary" :disabled="busy">{{ registering ? "注册" : "登录" }}</button>
           <button type="button" :disabled="busy" @click="registering = !registering; message = ''">{{ registering ? "已有账号" : "创建账号" }}</button>
           <button v-if="mailEnabled && !registering" type="button" :disabled="busy" @click="recovering = true; message = ''">找回密码</button>
+          <button v-if="mailEnabled && !registering" type="button" :disabled="busy || !username.trim()" @click="act(requestAccountRestoration)">申请恢复已关闭账号</button>
         </div>
       </form>
       <form v-else class="platform-form" @submit.prevent="act(resetPassword)">

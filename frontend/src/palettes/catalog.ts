@@ -14,6 +14,7 @@ export type PaletteDefinition = {
   retrievedAt: string;
   declaredCount: number;
   available: boolean;
+  cached?: boolean;
 };
 const retrievedAt = '2026-11-17';
 const page = (brand: string) => `https://www.pixel-beads.com/zh/${brand}-bead-color-chart`;
@@ -57,31 +58,96 @@ export function isDatabasePalette(id: unknown): id is string {
 
 type DatabaseVersion = {
   id: string; brand: string; series: string; sizeMm: number; version: string;
-  source: string; licenseStatus: string; status: string; colors: Color[];
+  source: string; licenseStatus: string; status: 'published' | 'retired'; colors: Color[];
 };
-export async function loadDatabasePalette(versionId: string) {
-  const id = 'db:' + versionId;
-  if (!isDatabasePalette(id)) throw Error('色卡版本无效');
-  const response = await fetch('/api/palettes/' + versionId, { cache: 'no-store' });
-  if (!response.ok) throw Error('数据库色卡暂不可用');
-  const data: DatabaseVersion = await response.json();
-  const colors = data.colors.map(({ code, hex }) => ({ code, hex }));
+const cacheKey = 'beads.public-palettes.v1';
+const cacheLimit = 16;
+const versions = new Map<string, DatabaseVersion>();
+const publicRequest = { cache: 'no-store', credentials: 'omit', redirect: 'error' } as const;
+
+const shortText = (value: unknown, max: number): value is string =>
+  typeof value === 'string' && value.length > 0 && value.length <= max;
+
+function normalizeVersion(value: unknown): DatabaseVersion | undefined {
+  if (!value || typeof value !== 'object') return;
+  const { id, brand, series, sizeMm, version, source, licenseStatus, status, colors } = value as Partial<DatabaseVersion>;
+  if (typeof id !== 'string' || !isDatabasePalette('db:' + id) ||
+      !shortText(brand, 60) || !shortText(series, 60) || !shortText(version, 80) ||
+      !shortText(source, 800) || !/^https?:\/\//i.test(source) || !shortText(licenseStatus, 30) ||
+      typeof sizeMm !== 'number' || !Number.isFinite(sizeMm) || sizeMm <= 0 || sizeMm > 50 ||
+      (status !== 'published' && status !== 'retired') || !Array.isArray(colors) ||
+      !colors.length || colors.length > 512) return;
+  const safeColors: Color[] = [];
+  const codes = new Set<string>();
+  for (const color of colors) {
+    if (!color || typeof color.code !== 'string' || typeof color.hex !== 'string' ||
+        !/^[A-Za-z0-9_.-]{1,32}$/.test(color.code) || !/^#[0-9a-f]{6}$/i.test(color.hex) ||
+        ['__proto__', 'prototype', 'constructor'].includes(color.code) || codes.has(color.code)) return;
+    codes.add(color.code);
+    safeColors.push({ code: color.code, hex: color.hex });
+  }
+  return { id, brand, series, sizeMm, version, source, licenseStatus, status, colors: safeColors };
+}
+
+function rememberVersion(data: DatabaseVersion, cached: boolean) {
+  const id = 'db:' + data.id;
+  versions.delete(data.id);
+  versions.set(data.id, data);
   DATABASE_PALETTES.set(id, {
-    id, colors, name: data.brand + ' / ' + data.series + ' · ' + data.version,
+    id, colors: data.colors, name: data.brand + ' / ' + data.series + ' · ' + data.version,
     info: {
       brand: data.brand, series: data.series + ' ' + data.sizeMm + 'mm', version: data.version,
       source: data.source, license: data.licenseStatus, note: '数据库色卡 · ' + (data.status === 'published' ? '已发布' : '已退役'),
     },
-    available: data.status === 'published', retrievedAt: '', declaredCount: colors.length,
+    available: data.status === 'published', cached, retrievedAt: '', declaredCount: data.colors.length,
   });
 }
 
+function savePublicPaletteCache() {
+  try { localStorage.setItem(cacheKey, JSON.stringify([...versions.values()].slice(-cacheLimit))); }
+  catch { /* The editor remains usable when persistent browser storage is unavailable. */ }
+}
+
+export function restorePublicPaletteCache() {
+  try {
+    const stored = localStorage.getItem(cacheKey);
+    if (!stored || stored.length > 600_000) return;
+    const data: unknown = JSON.parse(stored);
+    if (!Array.isArray(data)) return;
+    for (const item of data.slice(-cacheLimit)) {
+      const version = normalizeVersion(item);
+      if (version && !versions.has(version.id)) rememberVersion(version, true);
+    }
+  } catch { /* Invalid or disabled browser storage does not block the editor. */ }
+}
+
+async function fetchDatabasePalette(versionId: string) {
+  if (!isDatabasePalette('db:' + versionId)) throw Error('色卡版本无效');
+  const response = await fetch('/api/palettes/' + versionId, publicRequest);
+  if (!response.ok) throw Error('数据库色卡暂不可用');
+  const version = normalizeVersion(await response.json());
+  if (!version || version.id !== versionId) throw Error('数据库色卡数据无效');
+  rememberVersion(version, false);
+}
+
+export async function loadDatabasePalette(versionId: string) {
+  await fetchDatabasePalette(versionId);
+  savePublicPaletteCache();
+}
+
 export async function loadPublishedPalettes() {
-  const result = await fetch('/api/palettes', { cache: 'no-store' });
+  const known = [...versions.values()];
+  const result = await fetch('/api/palettes', publicRequest);
   if (!result.ok) return;
-  const versions: { id: string }[] = await result.json();
-  for (const [id, palette] of DATABASE_PALETTES) {
-    if (!versions.some(v => 'db:' + v.id === id)) DATABASE_PALETTES.set(id, { ...palette, available: false });
+  const published: unknown = await result.json();
+  if (!Array.isArray(published) || published.some(v => v?.status !== 'published' ||
+      typeof v.id !== 'string' || !isDatabasePalette('db:' + v.id))) return;
+  const active = new Set<string>(published.map(v => v.id));
+  for (const version of known) {
+    if (version.status === 'published' && !active.has(version.id) && versions.get(version.id) === version) {
+      rememberVersion({ ...version, status: 'retired' }, false);
+    }
   }
-  await Promise.all(versions.map(v => loadDatabasePalette(v.id)));
+  await Promise.allSettled([...active].map(fetchDatabasePalette));
+  savePublicPaletteCache();
 }

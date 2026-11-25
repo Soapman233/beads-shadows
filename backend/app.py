@@ -45,7 +45,7 @@ Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 ROOT = Path(__file__).resolve().parent
 APP_ID = 'beads-shadows'
 BACKEND_VERSION = '2026.11.17.1'
-FRONTEND_DIST = ROOT.parent / 'frontend' / 'dist'
+FRONTEND_DIST = Path(os.environ.get('BEAD_FRONTEND_DIST') or ROOT.parent / 'frontend' / 'dist')
 lock = threading.Lock()
 encoded_image_id = None
 
