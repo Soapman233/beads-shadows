@@ -10,7 +10,7 @@ import AIJobs from "./AIJobs.vue";
 import CommunityInbox from "./CommunityInbox.vue";
 import MaterialShop from "./MaterialShop.vue";
 import CollaborationPanel from "./CollaborationPanel.vue";
-import { jsonRequest, platformApi, type AccountSession } from "./platformApi";
+import { jsonRequest, platformApi, fetchPlatformResource, type AccountSession } from "./platformApi";
 import { createProjectStorage } from "./storage";
 import { loadPublishedPalettes, restorePublicPaletteCache } from "./palettes/catalog";
 import { validateProject } from "./project";
@@ -25,6 +25,7 @@ const available = ref(false), initialized = ref(false), busy = ref(false), messa
 const disconnected = ref(false), connecting = ref(false), recoverableId = ref<string>();
 const username = ref(""), password = ref(""), nickname = ref(""), preferred = ref("");
 const oldPassword = ref(""), newPassword = ref(""), registering = ref(false);
+const bindPassword = ref("");
 const email = ref(""), recoveryCode = ref(""), closePassword = ref(""), closeConfirmed = ref(false);
 const recovering = ref(false), mailEnabled = ref(false);
 const incoming = shallowRef<{ file: File; sourceOrigin: string }>();
@@ -35,7 +36,12 @@ watch(accountId, () => {
   incoming.value = undefined;
   importError.value = "";
   validRequests.clear();
-});
+  for (const field of [username, password, nickname, preferred, oldPassword, newPassword,
+    bindPassword, email, recoveryCode, closePassword]) field.value = "";
+  registering.value = false;
+  recovering.value = false;
+  closeConfirmed.value = false;
+}, { flush: "sync" });
 
 function extensionMessage(e: MessageEvent) {
   if (e.source !== window || e.origin !== location.origin || !e.data || e.data.version !== 1) return;
@@ -212,8 +218,8 @@ async function resetPassword() {
 }
 async function bindEmail() {
   await platformApi("/account/recovery/address", jsonRequest("POST",
-    { email: email.value, password: oldPassword.value }), session.value);
-  oldPassword.value = ""; message.value = "验证码已发出";
+    { email: email.value, password: bindPassword.value }), session.value);
+  bindPassword.value = ""; message.value = "验证码已发出";
 }
 async function verifyEmail() {
   await platformApi("/account/recovery/verify", jsonRequest("POST", { code: recoveryCode.value }), session.value);
@@ -228,7 +234,7 @@ async function closeAccount() {
 }
 async function downloadAccount() {
   if (!session.value.user) return;
-  const response = await fetch("/api/account/export", { cache: "no-store",
+  const response = await fetchPlatformResource("/api/account/export", { cache: "no-store",
     headers: { "X-Bead-Account": session.value.user.id } });
   if (!response.ok) throw Error("导出失败，请确认会话和服务器文件");
   const url = URL.createObjectURL(await response.blob());
@@ -270,28 +276,29 @@ async function openTemplate() {
     </section>
     <nav v-if="available" class="platform-nav" aria-label="工作区">
       <button :disabled="busy" @click="screen = 'editor'; message = ''">创作</button>
-      <button :disabled="busy" @click="screen = 'library'">图纸库</button>
+      <button :disabled="busy || disconnected" @click="screen = 'library'">图纸库</button>
       <template v-if="session.user">
-        <button :disabled="busy" @click="screen = 'cloud'; message = ''">我的项目</button>
-        <button :disabled="busy" @click="screen = 'inventory'">我的材料</button>
-        <button :disabled="busy" @click="screen = 'workshop'">制作记录</button>
-        <button :disabled="busy" @click="screen = 'ai'">图片重绘</button>
-        <button :disabled="busy" @click="screen = 'inbox'">消息</button>
-        <button :disabled="busy" @click="screen = 'shop'">材料商城</button>
-        <button :disabled="busy" @click="screen = 'collab'">协作</button>
-        <button v-if="session.user.role === 'admin'" :disabled="busy" @click="screen = 'admin'">管理</button>
-        <button :disabled="busy" @click="profile">{{ session.user.nickname }}</button>
-        <button :disabled="busy" @click="act(logout)">退出</button>
+        <button :disabled="busy || disconnected" @click="screen = 'cloud'; message = ''">我的项目</button>
+        <button :disabled="busy || disconnected" @click="screen = 'inventory'">我的材料</button>
+        <button :disabled="busy || disconnected" @click="screen = 'workshop'">制作记录</button>
+        <button :disabled="busy || disconnected" @click="screen = 'ai'">图片重绘</button>
+        <button :disabled="busy || disconnected" @click="screen = 'inbox'">消息</button>
+        <button :disabled="busy || disconnected" @click="screen = 'shop'">材料商城</button>
+        <button :disabled="busy || disconnected" @click="screen = 'collab'">协作</button>
+        <button v-if="session.user.role === 'admin'" :disabled="busy || disconnected" @click="screen = 'admin'">管理</button>
+        <button :disabled="busy || disconnected" @click="profile">{{ session.user.nickname }}</button>
+        <button :disabled="busy || disconnected" @click="act(logout)">退出</button>
       </template>
       <template v-else>
-        <button v-if="recoverableId" :disabled="busy" @click="act(restoreWorkspace)">恢复账号工作区</button>
-        <button :disabled="busy" @click="screen = 'login'">登录</button>
+        <button v-if="recoverableId" :disabled="busy || disconnected" @click="act(restoreWorkspace)">恢复账号工作区</button>
+        <button :disabled="busy || disconnected" @click="screen = 'login'">登录</button>
       </template>
     </nav>
     <p v-if="message && screen === 'editor'" class="platform-loading" role="status">{{ message }}</p>
     <div v-show="screen === 'editor'">
       <App :key="session.user?.id ?? 'guest'" ref="editor" :storage="storage" :session="session" :disconnected="disconnected" />
     </div>
+    <fieldset v-show="screen !== 'editor'" :disabled="disconnected" class="online-panels">
     <section v-if="screen === 'login'" class="platform-panel panel">
       <h2>{{ registering ? "注册" : "登录" }}</h2>
       <form v-if="!recovering" class="platform-form" @submit.prevent="act(authenticate)">
@@ -346,7 +353,7 @@ async function openTemplate() {
         <summary>绑定找回邮箱</summary>
         <form class="platform-form" @submit.prevent="act(bindEmail)">
           <label>邮箱 <input v-model="email" type="email" autocomplete="email" required /></label>
-          <label>当前密码 <input v-model="oldPassword" type="password" autocomplete="current-password" required /></label>
+          <label>当前密码 <input v-model="bindPassword" type="password" autocomplete="current-password" required /></label>
           <button :disabled="busy">发送验证码</button>
         </form>
         <form class="platform-form" @submit.prevent="act(verifyEmail)">
@@ -359,6 +366,7 @@ async function openTemplate() {
         <summary>关闭账号</summary>
         <form class="platform-form" @submit.prevent="act(closeAccount)">
           <p>关闭后账号退出登录，公开作品撤回。项目和操作记录进入保管状态。</p>
+          <p>恢复账号需要在关闭前绑定并验证邮箱，之后由管理员凭验证码办理。<span v-if="!mailEnabled">当前无法发送验证码。</span></p>
           <label>当前密码 <input v-model="closePassword" type="password" autocomplete="current-password" required /></label>
           <label><span><input v-model="closeConfirmed" type="checkbox" required /> 我确认关闭此账号</span></label>
           <button :disabled="busy || !closeConfirmed">关闭账号</button>
@@ -366,10 +374,12 @@ async function openTemplate() {
       </details>
       <p v-if="message" role="status">{{ message }}</p>
     </section>
+    </fieldset>
   </template>
 </template>
 
 <style>
+.online-panels{min-inline-size:0;margin:0;padding:0;border:0}
 .platform-nav,.platform-tools{display:flex;gap:.75rem;align-items:center;flex-wrap:wrap}
 .platform-nav{padding:.75rem max(1rem,5%);background:#f8faf8;border-bottom:1px solid #dce5df}
 .platform-panel,.platform-loading{margin:1.5rem auto;max-width:60rem;padding:1.25rem}

@@ -8,13 +8,24 @@ export type Account = {
 
 export type AccountSession = { user: Account | null; csrfToken: string | null };
 
+export async function fetchPlatformResource(url: string, options: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, options);
+  } catch (error) {
+    if (error instanceof TypeError || (error instanceof DOMException && error.name === "TimeoutError")) {
+      throw Error("无法连接本机服务，请检查连接后重试");
+    }
+    throw error;
+  }
+}
+
 export async function platformApi<T>(path: string, options: RequestInit = {}, session?: AccountSession): Promise<T> {
   const headers = new Headers(options.headers);
   if (session?.user) {
     headers.set("X-Bead-Account", session.user.id);
     if (session.csrfToken) headers.set("X-CSRF-Token", session.csrfToken);
   }
-  const response = await fetch("/api" + path, { ...options, headers, cache: "no-store" });
+  const response = await fetchPlatformResource("/api" + path, { ...options, headers, cache: "no-store" });
   if (response.status === 204) return undefined as T;
   const result = await response.json().catch(() => null);
   if (!response.ok) {
@@ -30,7 +41,7 @@ export function jsonRequest(method: string, value: unknown): RequestInit {
 
 export async function readAsset(id: string | null, session: AccountSession): Promise<string | undefined> {
   if (!id) return undefined;
-  const response = await fetch("/api/assets/" + encodeURIComponent(id) + "/content", {
+  const response = await fetchPlatformResource("/api/assets/" + encodeURIComponent(id) + "/content", {
     cache: "no-store",
     headers: { "X-Bead-Account": session.user!.id },
   });
