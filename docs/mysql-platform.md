@@ -58,7 +58,19 @@ Pop-Location
 - `BEAD_AI_SIMULATION=1` 启用明确标注的本地像素处理模拟。管理员需先发放额度。真实百炼还需配置 `BEAD_AI_PLATFORM_LIVE=1`、`BEAD_AI_ENABLED=1`、密钥和工作空间地址。未知计费任务由管理员核对确认后结算，系统不会自动重试。
 - `BEAD_MOCK_PAYMENTS=1` 开启本地模拟订单与付款。默认关闭。模拟商品、库存、订单及会员操作见 [商城演示](commerce-demo.md)。
 - `BEAD_DEVELOPMENT_OUTBOX` 指向本机私有目录时，验证码写入该目录的 EML 文件供隔离验收。正式 SMTP 使用 TLS，配置 `BEAD_SMTP_HOST`、`BEAD_SMTP_FROM` 与可选凭据。避免在同一实例同时配置测试收件箱与 SMTP。
-- 主动关闭撤销会话并撤回发布，项目和资产保留供事务恢复与审计。普通解冻入口拒绝关闭账号。正式保留期限和跨业务物理清理规则仍需由管理者确认，当前实施提供账号导出和保留状态。
+- 主动关闭撤销会话、撤回发布，并取消未开始的重绘任务和释放相应额度。已执行或待核账的任务按原规则处理。账号、项目和资产继续保留。
+
+### 已关闭账号的恢复
+
+账号所有者在登录页填写账号并申请恢复。验证码发送到关闭前已验证的邮箱，有效期为 15 分钟。管理员在「平台管理 → 用户」按账号查找，核对支持请求后填写理由和该次验证码。服务在同一事务内消费验证码、恢复登录、撤销旧会话并写入审计。恢复后本人需重新登录，原先撤回的图纸仍按发布流程重新审核。
+
+`BEAD_ACCOUNT_RECOVERY_DAYS` 可设置恢复窗口天数。留空时保留数据且恢复无额外的关闭日期限制。设置后，后台的超期预览只显示截止日期和数量，数据仍保留。未验证邮箱的关闭账号须由项目管理者另行核实身份。正式保留和清理政策待确认。[权限与保留矩阵](platform-access-matrix.md)
+
+具备 SMTP 测试权限后，可先只验证 TLS 握手。应用使用系统信任根和主机名校验。下面的连接检测读取当前进程配置，执行 SMTP NOOP 后断开。
+
+```powershell
+& $beadPython -c 'import os, smtplib, ssl; s = smtplib.SMTP_SSL(os.environ["BEAD_SMTP_HOST"], int(os.getenv("BEAD_SMTP_PORT", "465")), context=ssl.create_default_context(), timeout=15); print("SMTP NOOP:", s.noop()[0]); s.quit()'
+```
 
 ## 备份和恢复
 

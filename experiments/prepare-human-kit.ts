@@ -80,7 +80,8 @@ writeFileSync(
 );
 writeFileSync(join(out, "materials-10percent.csv"), materialsCSV(pattern, 10));
 writeFileSync(join(out, "pattern.svg"), svg);
-writeFileSync(join(out, "print.html"), html);
+const printRuler = `<p>请用 100% 缩放打印并测量下方标尺。</p><div style="width:50mm;height:3mm;border:1px solid #111;border-top:0"></div><p>50 mm</p>`;
+writeFileSync(join(out, "print.html"), html.replace("</button>", "</button>" + printRuler));
 writeFileSync(
   join(out, "record-template.md"),
   `# 实体制作记录（待本人填写）\n\n图纸：32×32，K8，${counts.total}颗，${used.length}色。\n\n|日期|拼豆品牌/批次|豆板钉距|打印缩放|制作耗时|缺豆/错色|实物观感与光源|\n|---|---|---|---|---|---|---|\n|待填写|||||||\n\n请附实物照片；不要将生成材料包写为完成实体验证。\n`,

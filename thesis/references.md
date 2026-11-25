@@ -6,3 +6,7 @@
 - Meta SAM2官方源码：可选模型来源与安装。https://github.com/facebookresearch/sam2
 - Zippland/perler-beads：工作流参考，不复制AGPL代码。https://github.com/Zippland/perler-beads
 其余技术背景如GrabCut原论文，应由作者实际阅读全文核实后补充正式参考，当前不编造卷页与DOI。链接已在项目开发中用于来源核查；最终论文提交前本人再次确认访问日期及规范格式。
+
+- MySQL 的时间精度用于解释后台概况的 UTC 聚合边界。[MySQL 8.4 时间值的小数秒](https://dev.mysql.com/doc/refman/8.4/en/fractional-seconds.html)
+- Python 默认 TLS 上下文用于说明 SMTP 证书及主机名验证。[Python 3.12 SSL 文档](https://docs.python.org/3.12/library/ssl.html#ssl.create_default_context)
+- 校方模板提交后统一核对封面、学院要求、图表顺序、参考文献格式与答辩时长。
